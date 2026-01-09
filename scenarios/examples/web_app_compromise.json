@@ -1,0 +1,275 @@
+{
+  "scenario_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "name": "Web Application Compromise",
+  "version": "1.0.0",
+  "description": "Simulates an attack chain targeting a web application, exploiting vulnerabilities to gain access, establish persistence, and exfiltrate data.",
+  "objective": "Gain access to backend database through web application vulnerability",
+  "classification_level": "UNCLASS",
+  "targets": [
+    {
+      "name": "web-server-01",
+      "type": "web_server",
+      "ip_address": "10.0.1.10",
+      "network": "10.0.1.0/24",
+      "os": "Ubuntu 22.04",
+      "criticality": "medium",
+      "services": [
+        {"port": 80, "protocol": "tcp", "service": "http"},
+        {"port": 443, "protocol": "tcp", "service": "https"},
+        {"port": 22, "protocol": "tcp", "service": "ssh"}
+      ]
+    },
+    {
+      "name": "db-server-01",
+      "type": "database_server",
+      "ip_address": "10.0.2.20",
+      "network": "10.0.2.0/24",
+      "os": "Ubuntu 22.04",
+      "criticality": "high",
+      "services": [
+        {"port": 5432, "protocol": "tcp", "service": "postgresql"},
+        {"port": 22, "protocol": "tcp", "service": "ssh"}
+      ]
+    }
+  ],
+  "kill_chain": [
+    "reconnaissance",
+    "initial_access",
+    "execution",
+    "persistence",
+    "discovery",
+    "lateral_movement",
+    "collection",
+    "exfiltration"
+  ],
+  "phases": [
+    {
+      "phase_id": "phase-001",
+      "name": "Reconnaissance",
+      "type": "reconnaissance",
+      "objective": "Identify web application vulnerabilities",
+      "actions": [
+        {
+          "action_id": "action-001",
+          "type": "reconnaissance",
+          "technique_id": "T1595.002",
+          "tool": "nmap",
+          "target": "web-server-01",
+          "parameters": {
+            "scan_type": "service_version",
+            "ports": "1-1000"
+          },
+          "expected_outcome": "Service enumeration complete"
+        },
+        {
+          "action_id": "action-002",
+          "type": "reconnaissance",
+          "technique_id": "T1595.003",
+          "tool": "nikto",
+          "target": "web-server-01",
+          "parameters": {
+            "scan_type": "vulnerability"
+          },
+          "expected_outcome": "Web vulnerabilities identified"
+        }
+      ],
+      "timeout_minutes": 30
+    },
+    {
+      "phase_id": "phase-002",
+      "name": "Initial Access",
+      "type": "initial_access",
+      "objective": "Exploit web application vulnerability",
+      "actions": [
+        {
+          "action_id": "action-003",
+          "type": "initial_access",
+          "technique_id": "T1190",
+          "tool": "sqlmap",
+          "target": "web-server-01",
+          "parameters": {
+            "injection_type": "sql",
+            "target_url": "/api/search"
+          },
+          "expected_outcome": "SQL injection successful"
+        }
+      ],
+      "dependencies": ["phase-001"],
+      "timeout_minutes": 60
+    },
+    {
+      "phase_id": "phase-003",
+      "name": "Execution",
+      "type": "execution",
+      "objective": "Establish command execution",
+      "actions": [
+        {
+          "action_id": "action-004",
+          "type": "execution",
+          "technique_id": "T1059.004",
+          "tool": "reverse_shell",
+          "target": "web-server-01",
+          "parameters": {
+            "shell_type": "bash"
+          },
+          "expected_outcome": "Shell access obtained"
+        }
+      ],
+      "dependencies": ["phase-002"],
+      "timeout_minutes": 30
+    },
+    {
+      "phase_id": "phase-004",
+      "name": "Persistence",
+      "type": "persistence",
+      "objective": "Maintain access",
+      "actions": [
+        {
+          "action_id": "action-005",
+          "type": "persistence",
+          "technique_id": "T1136.001",
+          "tool": "useradd",
+          "target": "web-server-01",
+          "parameters": {
+            "username": "svc_backup",
+            "privilege": "sudo"
+          },
+          "expected_outcome": "Persistent access established"
+        }
+      ],
+      "dependencies": ["phase-003"],
+      "timeout_minutes": 15
+    },
+    {
+      "phase_id": "phase-005",
+      "name": "Discovery",
+      "type": "discovery",
+      "objective": "Map internal network",
+      "actions": [
+        {
+          "action_id": "action-006",
+          "type": "discovery",
+          "technique_id": "T1046",
+          "tool": "nmap",
+          "target": "web-server-01",
+          "parameters": {
+            "scan_type": "ping_sweep",
+            "network": "10.0.2.0/24"
+          },
+          "expected_outcome": "Database server discovered"
+        }
+      ],
+      "dependencies": ["phase-003"],
+      "timeout_minutes": 30
+    },
+    {
+      "phase_id": "phase-006",
+      "name": "Lateral Movement",
+      "type": "lateral_movement",
+      "objective": "Access database server",
+      "actions": [
+        {
+          "action_id": "action-007",
+          "type": "lateral_movement",
+          "technique_id": "T1021.004",
+          "tool": "ssh",
+          "target": "db-server-01",
+          "parameters": {
+            "method": "key_reuse"
+          },
+          "expected_outcome": "Database server access obtained"
+        }
+      ],
+      "dependencies": ["phase-004", "phase-005"],
+      "timeout_minutes": 30
+    },
+    {
+      "phase_id": "phase-007",
+      "name": "Collection",
+      "type": "collection",
+      "objective": "Extract sensitive data",
+      "actions": [
+        {
+          "action_id": "action-008",
+          "type": "collection",
+          "technique_id": "T1005",
+          "tool": "pg_dump",
+          "target": "db-server-01",
+          "parameters": {
+            "database": "customer_data",
+            "tables": ["users", "orders"]
+          },
+          "expected_outcome": "Data collected"
+        }
+      ],
+      "dependencies": ["phase-006"],
+      "timeout_minutes": 60
+    },
+    {
+      "phase_id": "phase-008",
+      "name": "Exfiltration",
+      "type": "exfiltration",
+      "objective": "Exfiltrate collected data",
+      "actions": [
+        {
+          "action_id": "action-009",
+          "type": "exfiltration",
+          "technique_id": "T1041",
+          "tool": "encrypted_channel",
+          "target": "db-server-01",
+          "parameters": {
+            "method": "https",
+            "encryption": "aes256"
+          },
+          "expected_outcome": "Data exfiltrated"
+        }
+      ],
+      "dependencies": ["phase-007"],
+      "timeout_minutes": 30
+    }
+  ],
+  "success_criteria": [
+    {
+      "name": "Web Server Access",
+      "type": "access_obtained",
+      "target": "web-server-01",
+      "required": true
+    },
+    {
+      "name": "Database Access",
+      "type": "lateral_movement_achieved",
+      "target": "db-server-01",
+      "required": true
+    },
+    {
+      "name": "Data Exfiltration",
+      "type": "data_exfiltrated",
+      "target": "db-server-01",
+      "required": true
+    }
+  ],
+  "constraints": {
+    "max_duration_minutes": 480,
+    "max_alerts": 10,
+    "stealth_required": false
+  },
+  "environment": {
+    "network_topology": "Flat network with web DMZ",
+    "security_controls": [
+      "Firewall",
+      "IDS",
+      "WAF",
+      "Endpoint AV"
+    ]
+  },
+  "metadata": {
+    "author": "security-team",
+    "created_at": "2025-01-01T00:00:00Z",
+    "updated_at": "2025-01-01T00:00:00Z",
+    "tags": ["web", "sql-injection", "lateral-movement", "data-exfiltration"],
+    "references": [
+      "https://attack.mitre.org/techniques/T1190/",
+      "https://attack.mitre.org/techniques/T1021/004/"
+    ]
+  }
+}

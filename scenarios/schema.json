@@ -1,0 +1,343 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://frostgate-spear.io/schemas/scenario.json",
+  "title": "Frost Gate Spear Scenario",
+  "description": "Attack scenario definition for mission execution",
+  "type": "object",
+  "required": ["name", "version", "targets"],
+  "properties": {
+    "scenario_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for this scenario"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "description": "Human-readable scenario name"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Semantic version"
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 2000,
+      "description": "Detailed scenario description"
+    },
+    "objective": {
+      "type": "string",
+      "description": "Primary objective of the scenario"
+    },
+    "classification_level": {
+      "type": "string",
+      "enum": ["UNCLASS", "CUI", "SECRET", "TOPSECRET"],
+      "description": "Minimum classification level required"
+    },
+    "targets": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/Target"
+      },
+      "minItems": 1,
+      "description": "Target systems for the scenario"
+    },
+    "kill_chain": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "reconnaissance",
+          "weaponization",
+          "delivery",
+          "exploitation",
+          "installation",
+          "command_and_control",
+          "actions_on_objectives",
+          "initial_access",
+          "execution",
+          "persistence",
+          "privilege_escalation",
+          "defense_evasion",
+          "credential_access",
+          "discovery",
+          "lateral_movement",
+          "collection",
+          "exfiltration",
+          "impact"
+        ]
+      },
+      "description": "Kill chain phases to execute"
+    },
+    "phases": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/Phase"
+      },
+      "description": "Predefined execution phases"
+    },
+    "success_criteria": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/SuccessCriterion"
+      },
+      "description": "Criteria for scenario success"
+    },
+    "constraints": {
+      "type": "object",
+      "properties": {
+        "max_duration_minutes": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum scenario duration"
+        },
+        "max_alerts": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum alerts allowed"
+        },
+        "stealth_required": {
+          "type": "boolean",
+          "description": "Whether stealth is required"
+        },
+        "time_window": {
+          "type": "object",
+          "properties": {
+            "start": { "type": "string", "format": "time" },
+            "end": { "type": "string", "format": "time" },
+            "days": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "properties": {
+        "network_topology": {
+          "type": "string",
+          "description": "Description or reference to network topology"
+        },
+        "domain_info": {
+          "type": "object",
+          "properties": {
+            "domain_name": { "type": "string" },
+            "forest_name": { "type": "string" },
+            "functional_level": { "type": "string" }
+          }
+        },
+        "security_controls": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Security controls in place"
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "author": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "references": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "Target": {
+      "type": "object",
+      "required": ["name", "type"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Target identifier/hostname"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "domain_controller",
+            "pki_server",
+            "database_server",
+            "file_server",
+            "web_server",
+            "mail_server",
+            "workstation",
+            "printer",
+            "iot_device",
+            "scada",
+            "ics",
+            "medical_device",
+            "safety_system",
+            "network_device",
+            "cloud_instance",
+            "container",
+            "other"
+          ],
+          "description": "Target system type"
+        },
+        "ip_address": {
+          "type": "string",
+          "format": "ipv4",
+          "description": "IP address if known"
+        },
+        "network": {
+          "type": "string",
+          "description": "Network segment (CIDR)"
+        },
+        "os": {
+          "type": "string",
+          "description": "Operating system"
+        },
+        "criticality": {
+          "type": "string",
+          "enum": ["low", "medium", "high", "critical"],
+          "description": "Business criticality"
+        },
+        "services": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "port": { "type": "integer" },
+              "protocol": { "type": "string" },
+              "service": { "type": "string" }
+            }
+          },
+          "description": "Known services"
+        },
+        "credentials": {
+          "type": "object",
+          "properties": {
+            "provided": { "type": "boolean" },
+            "type": { "type": "string" }
+          },
+          "description": "Credential information"
+        }
+      }
+    },
+    "Phase": {
+      "type": "object",
+      "required": ["name", "type"],
+      "properties": {
+        "phase_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "name": {
+          "type": "string",
+          "description": "Phase name"
+        },
+        "type": {
+          "type": "string",
+          "description": "Phase type (kill chain phase)"
+        },
+        "objective": {
+          "type": "string",
+          "description": "Phase objective"
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Action"
+          },
+          "description": "Actions in this phase"
+        },
+        "dependencies": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Phase IDs this phase depends on"
+        },
+        "timeout_minutes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "Action": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "action_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "type": {
+          "type": "string",
+          "description": "Action type"
+        },
+        "technique_id": {
+          "type": "string",
+          "pattern": "^T\\d{4}(\\.\\d{3})?$",
+          "description": "MITRE ATT&CK technique ID"
+        },
+        "tool": {
+          "type": "string",
+          "description": "Tool to use"
+        },
+        "target": {
+          "type": "string",
+          "description": "Target name reference"
+        },
+        "parameters": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Action-specific parameters"
+        },
+        "expected_outcome": {
+          "type": "string",
+          "description": "Expected result"
+        },
+        "fallback_action": {
+          "type": "string",
+          "description": "Fallback if action fails"
+        }
+      }
+    },
+    "SuccessCriterion": {
+      "type": "object",
+      "required": ["name", "type"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Criterion name"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "access_obtained",
+            "data_exfiltrated",
+            "persistence_established",
+            "privilege_escalated",
+            "lateral_movement_achieved",
+            "objective_reached",
+            "custom"
+          ]
+        },
+        "target": {
+          "type": "string",
+          "description": "Target for criterion"
+        },
+        "condition": {
+          "type": "string",
+          "description": "Condition expression"
+        },
+        "required": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether criterion is required for success"
+        }
+      }
+    }
+  }
+}

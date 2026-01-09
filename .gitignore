@@ -1,0 +1,113 @@
+# Frost Gate Spear .gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# Testing
+.coverage
+.pytest_cache/
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Documentation
+docs/_build/
+site/
+
+# Logs
+*.log
+logs/
+/var/log/frostgate/
+
+# Database
+*.db
+*.sqlite3
+
+# Environment
+.env
+.env.local
+.env.*.local
+*.env
+
+# Secrets - NEVER commit these
+secrets/
+*.key
+*.pem
+*.crt
+credentials.json
+service-account.json
+
+# Docker
+.docker/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.tar.gz
+*.zip
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local config overrides
+configs/local.yaml
+configs/dev.yaml
+
+# Model files (large)
+models/*.pt
+models/*.pth
+models/*.onnx
+models/*.pkl
+
+# SBOM artifacts (generated)
+sbom/generated/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
