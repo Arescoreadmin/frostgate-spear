@@ -1,0 +1,244 @@
+# Frost Gate Spear - Federated Learning Ring Configuration
+# Ring: CUI
+# Version: 1.0.0
+
+ring:
+  name: CUI
+  level: 1
+  description: "Controlled Unclassified Information Federated Learning ring"
+
+# FL Server Configuration
+server:
+  endpoint: "fl-server.cui.frostgate.internal:8443"
+  protocol: "grpc"
+  tls:
+    enabled: true
+    mtls: true
+    fips_mode: true
+    cert_path: "/etc/frostgate/certs/cui/fl-server.crt"
+    key_path: "/etc/frostgate/certs/cui/fl-server.key"
+    ca_path: "/etc/frostgate/certs/cui/ca.crt"
+    cipher_suites:
+      - "TLS_AES_256_GCM_SHA384"
+      - "TLS_CHACHA20_POLY1305_SHA256"
+
+# Aggregation Configuration
+aggregation:
+  strategy: "secure_aggregation"
+  min_participants: 5
+  max_participants: 50
+  round_timeout_seconds: 600
+  staleness_threshold: 1
+
+  weighting:
+    method: "sample_count"
+    normalize: true
+    min_samples: 100
+
+  gradient_clipping:
+    enabled: true
+    max_norm: 0.5
+    norm_type: 2
+
+  # Byzantine robustness
+  byzantine_tolerance:
+    enabled: true
+    method: "trimmed_mean"
+    trim_ratio: 0.1
+
+# Differential Privacy Configuration
+differential_privacy:
+  enabled: true
+  mechanism: "gaussian"
+  epsilon: 0.5
+  delta: 1e-6
+
+  noise:
+    scale: "auto"
+    clip_norm: 0.5
+
+  accounting:
+    method: "rdp"
+    target_epsilon: 5.0
+    max_rounds: 500
+
+  # Per-sample privacy
+  sample_level_dp:
+    enabled: true
+    subsampling_rate: 0.01
+
+# Secure Aggregation
+secure_aggregation:
+  enabled: true
+  protocol: "secagg_plus"
+
+  # Key exchange
+  key_exchange:
+    method: "ecdh"
+    curve: "P-384"
+
+  # Secret sharing
+  secret_sharing:
+    threshold: 3
+    total_shares: 5
+
+  # Dropout tolerance
+  dropout_tolerance: 0.2
+
+# Model Configuration
+model:
+  types_allowed:
+    - "attack_classifier"
+    - "technique_selector"
+    - "impact_predictor"
+    - "defender_model"
+    - "persona_model"
+
+  versioning:
+    enabled: true
+    storage: "s3://frostgate-models-cui/cui/"
+    encryption: true
+    encryption_key_id: "cui-model-key"
+
+  validation:
+    schema_check: true
+    size_limit_mb: 1000
+    format: ["pytorch", "tensorflow", "onnx"]
+    signature_required: true
+
+# Data Configuration
+data:
+  sources:
+    - type: "simulation_logs"
+      path: "/data/cui/sim/"
+      classification: "CUI"
+    - type: "lab_results"
+      path: "/data/cui/lab/"
+      classification: "CUI"
+    - type: "mission_telemetry"
+      path: "/data/cui/mission/"
+      classification: "CUI"
+
+  preprocessing:
+    anonymization: true
+    pii_scrubbing: true
+    feature_normalization: true
+    audit_logging: true
+
+  retention_days: 730
+  encryption_at_rest: true
+
+# Training Configuration
+training:
+  local_epochs: 3
+  batch_size: 64
+  learning_rate: 0.001
+  optimizer: "adam"
+
+  # Gradient compression
+  compression:
+    enabled: true
+    method: "top_k"
+    ratio: 0.1
+
+  resources:
+    max_memory_gb: 32
+    max_cpu_cores: 8
+    max_gpu_memory_gb: 16
+    timeout_minutes: 60
+
+# Cross-Ring Policy
+cross_ring:
+  gradient_sharing:
+    enabled: false
+    # Gradients NEVER cross ring boundaries without DP
+
+  # Aggregated model sharing (with DP guarantees)
+  model_sharing:
+    to_unclass:
+      enabled: true
+      requirements:
+        dp_epsilon_bound: 1.0
+        sanitization: true
+        approval_roles: ["Security", "GovCompliance"]
+
+    to_secret:
+      enabled: false  # Models trained at CUI cannot be promoted to SECRET
+
+  model_promotion:
+    enabled: false  # CUI models stay at CUI
+
+# Lineage Tracking
+lineage:
+  enabled: true
+  tracking:
+    - model_versions
+    - training_rounds
+    - participant_ids
+    - data_sources
+    - hyperparameters
+    - dp_budget_consumed
+    - security_reviews
+
+  merkle_tree:
+    enabled: true
+    hash_algorithm: "SHA-384"
+    anchor_to_blockchain: false
+
+  storage: "postgres://lineage.frostgate.internal/cui"
+  encryption: true
+
+# Monitoring
+monitoring:
+  metrics:
+    - accuracy
+    - loss
+    - round_time
+    - participant_count
+    - gradient_norm
+    - privacy_budget_used
+    - secagg_success_rate
+    - dropout_rate
+
+  alerts:
+    accuracy_drop_threshold: 0.05
+    round_timeout_alert: true
+    participant_drop_alert: true
+    privacy_budget_alert_threshold: 0.8
+    secagg_failure_alert: true
+
+  dashboard: "https://grafana.frostgate.internal/fl/cui"
+
+# Audit
+audit:
+  enabled: true
+  log_level: "DEBUG"
+  events:
+    - round_start
+    - round_end
+    - model_update
+    - participant_join
+    - participant_leave
+    - key_exchange
+    - secret_share
+    - aggregation_complete
+    - dp_noise_added
+    - error
+    - security_event
+
+  storage: "/var/log/frostgate/fl/cui"
+  encryption: true
+  retention_days: 2555
+  worm_storage: true
+  external_timestamp: true
+
+# Zero Trust
+zero_trust:
+  participant_verification:
+    mtls_required: true
+    identity_verification: true
+    attestation_required: true
+
+  session_management:
+    timeout_minutes: 60
+    reauthentication_required: true

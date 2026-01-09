@@ -1,0 +1,170 @@
+# Frost Gate Spear - Federated Learning Ring Configuration
+# Ring: UNCLASS
+# Version: 1.0.0
+
+ring:
+  name: UNCLASS
+  level: 0
+  description: "Unclassified Federated Learning ring"
+
+# FL Server Configuration
+server:
+  endpoint: "fl-server.unclass.frostgate.internal:8443"
+  protocol: "grpc"
+  tls:
+    enabled: true
+    mtls: true
+    cert_path: "/etc/frostgate/certs/fl-server.crt"
+    key_path: "/etc/frostgate/certs/fl-server.key"
+    ca_path: "/etc/frostgate/certs/ca.crt"
+
+# Aggregation Configuration
+aggregation:
+  strategy: "fedavg"
+  min_participants: 3
+  max_participants: 100
+  round_timeout_seconds: 300
+  staleness_threshold: 2
+
+  # Weighted aggregation options
+  weighting:
+    method: "sample_count"  # sample_count, uniform, custom
+    normalize: true
+
+  # Clipping for robustness
+  gradient_clipping:
+    enabled: true
+    max_norm: 1.0
+    norm_type: 2
+
+# Differential Privacy Configuration
+differential_privacy:
+  enabled: true
+  mechanism: "gaussian"
+  epsilon: 1.0
+  delta: 1e-5
+
+  # Noise addition
+  noise:
+    scale: "auto"  # Computed from epsilon/delta
+    clip_norm: 1.0
+
+  # Privacy accounting
+  accounting:
+    method: "rdp"  # Renyi Differential Privacy
+    target_epsilon: 10.0
+    max_rounds: 1000
+
+# Secure Aggregation
+secure_aggregation:
+  enabled: false  # Basic SecAgg not required for UNCLASS
+  protocol: "none"
+
+# Model Configuration
+model:
+  types_allowed:
+    - "attack_classifier"
+    - "technique_selector"
+    - "impact_predictor"
+    - "defender_model"
+
+  versioning:
+    enabled: true
+    storage: "s3://frostgate-models/unclass/"
+
+  validation:
+    schema_check: true
+    size_limit_mb: 500
+    format: ["pytorch", "tensorflow", "onnx"]
+
+# Data Configuration
+data:
+  sources:
+    - type: "simulation_logs"
+      path: "/data/unclass/sim/"
+    - type: "lab_results"
+      path: "/data/unclass/lab/"
+
+  preprocessing:
+    anonymization: true
+    feature_normalization: true
+
+  retention_days: 365
+
+# Training Configuration
+training:
+  local_epochs: 5
+  batch_size: 32
+  learning_rate: 0.01
+  optimizer: "adam"
+
+  # Resource limits per participant
+  resources:
+    max_memory_gb: 16
+    max_cpu_cores: 4
+    max_gpu_memory_gb: 8
+    timeout_minutes: 30
+
+# Cross-Ring Policy
+cross_ring:
+  # No cross-ring gradient sharing from UNCLASS
+  gradient_sharing:
+    enabled: false
+
+  # Model promotion to higher rings
+  model_promotion:
+    enabled: true
+    target_rings: ["CUI"]
+    requirements:
+      min_rounds: 100
+      min_accuracy: 0.85
+      security_review: true
+      approval_roles: ["Security"]
+
+# Lineage Tracking
+lineage:
+  enabled: true
+  tracking:
+    - model_versions
+    - training_rounds
+    - participant_ids
+    - data_sources
+    - hyperparameters
+
+  merkle_tree:
+    enabled: true
+    hash_algorithm: "SHA-256"
+
+  storage: "postgres://lineage.frostgate.internal/unclass"
+
+# Monitoring
+monitoring:
+  metrics:
+    - accuracy
+    - loss
+    - round_time
+    - participant_count
+    - gradient_norm
+    - privacy_budget_used
+
+  alerts:
+    accuracy_drop_threshold: 0.1
+    round_timeout_alert: true
+    participant_drop_alert: true
+
+  dashboard: "https://grafana.frostgate.internal/fl/unclass"
+
+# Audit
+audit:
+  enabled: true
+  log_level: "INFO"
+  events:
+    - round_start
+    - round_end
+    - model_update
+    - participant_join
+    - participant_leave
+    - error
+
+  storage: "/var/log/frostgate/fl/unclass"
+  retention_days: 365

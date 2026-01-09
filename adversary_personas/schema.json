@@ -1,0 +1,342 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://frostgate-spear.io/schemas/adversary-persona.json",
+  "title": "Frost Gate Spear Adversary Persona",
+  "description": "Schema for adversary persona definition and configuration",
+  "type": "object",
+  "required": [
+    "persona_id",
+    "version",
+    "name",
+    "category",
+    "classification_level",
+    "ttps",
+    "signature",
+    "attestation"
+  ],
+  "properties": {
+    "persona_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for this persona"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Semantic version of the persona definition"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "description": "Human-readable name for the persona"
+    },
+    "category": {
+      "type": "string",
+      "enum": [
+        "script_kiddie",
+        "cybercriminal",
+        "hacktivist",
+        "nation_state_lite",
+        "nation_state",
+        "nation_state_advanced",
+        "apt",
+        "apt_full",
+        "insider",
+        "insider_privileged"
+      ],
+      "description": "Category classification of the adversary"
+    },
+    "classification_level": {
+      "type": "string",
+      "enum": ["UNCLASS", "CUI", "SECRET", "TOPSECRET"],
+      "description": "Minimum classification level required to use this persona"
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 2000,
+      "description": "Detailed description of the adversary persona"
+    },
+    "attribution": {
+      "type": "object",
+      "properties": {
+        "country": {
+          "type": "string",
+          "description": "Attributed country of origin"
+        },
+        "group_names": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Known group names/aliases"
+        },
+        "mitre_groups": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "MITRE ATT&CK group IDs"
+        },
+        "active_since": {
+          "type": "string",
+          "format": "date",
+          "description": "Date group became active"
+        },
+        "targets": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Typical target sectors"
+        }
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "properties": {
+        "sophistication": {
+          "type": "string",
+          "enum": ["low", "medium", "high", "advanced", "elite"],
+          "description": "Overall sophistication level"
+        },
+        "resources": {
+          "type": "string",
+          "enum": ["minimal", "limited", "moderate", "significant", "unlimited"],
+          "description": "Resource availability"
+        },
+        "persistence": {
+          "type": "string",
+          "enum": ["opportunistic", "targeted", "persistent", "highly_persistent"],
+          "description": "Persistence level"
+        },
+        "stealth": {
+          "type": "string",
+          "enum": ["noisy", "moderate", "stealthy", "highly_stealthy"],
+          "description": "Stealth capability"
+        },
+        "zero_days": {
+          "type": "boolean",
+          "description": "Has access to zero-day exploits"
+        },
+        "custom_malware": {
+          "type": "boolean",
+          "description": "Develops custom malware"
+        },
+        "supply_chain": {
+          "type": "boolean",
+          "description": "Capable of supply chain attacks"
+        }
+      }
+    },
+    "ttps": {
+      "type": "object",
+      "description": "MITRE ATT&CK TTPs",
+      "properties": {
+        "preferred_tactics": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Preferred MITRE tactics"
+        },
+        "techniques": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "technique_id": { "type": "string" },
+              "name": { "type": "string" },
+              "preference_weight": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "subtechniques": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            },
+            "required": ["technique_id", "name"]
+          }
+        },
+        "tool_preferences": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "tool": { "type": "string" },
+              "preference_weight": { "type": "number" }
+            }
+          }
+        },
+        "kill_chain_preferences": {
+          "type": "object",
+          "description": "Preferences for each kill chain phase",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "duration_bias": { "type": "string" },
+              "technique_preferences": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "behavioral_profile": {
+      "type": "object",
+      "properties": {
+        "working_hours": {
+          "type": "object",
+          "properties": {
+            "timezone": { "type": "string" },
+            "start_hour": { "type": "integer", "minimum": 0, "maximum": 23 },
+            "end_hour": { "type": "integer", "minimum": 0, "maximum": 23 },
+            "working_days": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        },
+        "dwell_time": {
+          "type": "object",
+          "properties": {
+            "min_days": { "type": "integer" },
+            "max_days": { "type": "integer" },
+            "typical_days": { "type": "integer" }
+          }
+        },
+        "lateral_movement_style": {
+          "type": "string",
+          "enum": ["aggressive", "cautious", "methodical", "opportunistic"]
+        },
+        "data_exfil_style": {
+          "type": "string",
+          "enum": ["bulk", "staged", "low_and_slow", "on_demand"]
+        },
+        "c2_patterns": {
+          "type": "object",
+          "properties": {
+            "beacon_interval": { "type": "string" },
+            "jitter": { "type": "number" },
+            "protocols": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "constraints": {
+      "type": "object",
+      "description": "Persona constraints - CANNOT override ROE/safety",
+      "properties": {
+        "can_override_roe": {
+          "type": "boolean",
+          "const": false,
+          "description": "Personas can NEVER override ROE"
+        },
+        "can_override_safety": {
+          "type": "boolean",
+          "const": false,
+          "description": "Personas can NEVER override safety constraints"
+        },
+        "can_override_policy": {
+          "type": "boolean",
+          "const": false,
+          "description": "Personas can NEVER override policy envelope"
+        },
+        "respects_blast_radius": {
+          "type": "boolean",
+          "const": true,
+          "description": "Must respect blast radius caps"
+        },
+        "respects_scope": {
+          "type": "boolean",
+          "const": true,
+          "description": "Must respect scope boundaries"
+        }
+      }
+    },
+    "planner_biases": {
+      "type": "object",
+      "description": "Biases applied to planner decisions",
+      "properties": {
+        "technique_selection": {
+          "type": "object",
+          "additionalProperties": { "type": "number" }
+        },
+        "target_prioritization": {
+          "type": "object",
+          "additionalProperties": { "type": "number" }
+        },
+        "timing_preferences": {
+          "type": "object",
+          "additionalProperties": { "type": "number" }
+        },
+        "evasion_priorities": {
+          "type": "object",
+          "additionalProperties": { "type": "number" }
+        }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "required": ["algorithm", "value", "signer_id"],
+      "properties": {
+        "algorithm": {
+          "type": "string",
+          "enum": ["RSA-SHA256", "ECDSA-P384", "Ed25519"]
+        },
+        "value": {
+          "type": "string",
+          "description": "Base64-encoded signature"
+        },
+        "signer_id": {
+          "type": "string",
+          "description": "ID of the signing authority"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "attestation": {
+      "type": "object",
+      "required": ["hash", "provenance"],
+      "properties": {
+        "hash": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "provenance": {
+          "type": "object",
+          "properties": {
+            "builder": { "type": "string" },
+            "build_id": { "type": "string" },
+            "source_repo": { "type": "string" },
+            "source_commit": { "type": "string" }
+          }
+        },
+        "sbom_ref": {
+          "type": "string",
+          "description": "Reference to SBOM for any included tools"
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "created_at": { "type": "string", "format": "date-time" },
+        "created_by": { "type": "string" },
+        "updated_at": { "type": "string", "format": "date-time" },
+        "reviewed_by": { "type": "string" },
+        "review_date": { "type": "string", "format": "date-time" },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "references": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+}
