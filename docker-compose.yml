@@ -1,0 +1,137 @@
+version: '3.8'
+
+services:
+  # Main Frost Gate Spear Application
+  frostgate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: frostgate-spear:latest
+    container_name: frostgate-spear
+    ports:
+      - "8080:8080"
+    environment:
+      - FROSTGATE_CONFIG=/app/configs/default.yaml
+      - LOG_LEVEL=INFO
+      - ENVIRONMENT=simulation
+    volumes:
+      - frostgate-logs:/var/log/frostgate
+      - ./configs:/app/configs:ro
+    networks:
+      - frostgate-net
+    depends_on:
+      - redis
+      - postgres
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # Redis for caching and pub/sub
+  redis:
+    image: redis:7-alpine
+    container_name: frostgate-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - frostgate-net
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # PostgreSQL for mission and forensic data
+  postgres:
+    image: postgres:15-alpine
+    container_name: frostgate-postgres
+    environment:
+      POSTGRES_USER: frostgate
+      POSTGRES_PASSWORD: frostgate_secret
+      POSTGRES_DB: frostgate
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - frostgate-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U frostgate"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # OPA for policy evaluation
+  opa:
+    image: openpolicyagent/opa:latest-rootless
+    container_name: frostgate-opa
+    ports:
+      - "8181:8181"
+    volumes:
+      - ./policy:/policies:ro
+    networks:
+      - frostgate-net
+    command:
+      - "run"
+      - "--server"
+      - "--addr=0.0.0.0:8181"
+      - "/policies"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8181/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # Prometheus for metrics
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: frostgate-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./configs/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - frostgate-net
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    restart: unless-stopped
+
+  # Grafana for dashboards
+  grafana:
+    image: grafana/grafana:latest
+    container_name: frostgate-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./configs/grafana/provisioning:/etc/grafana/provisioning:ro
+    networks:
+      - frostgate-net
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+networks:
+  frostgate-net:
+    driver: bridge
+
+volumes:
+  frostgate-logs:
+  redis-data:
+  postgres-data:
+  prometheus-data:
+  grafana-data:

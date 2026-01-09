@@ -1,0 +1,103 @@
+{
+  "envelope_id": "550e8400-e29b-41d4-a716-446655440000",
+  "version": "1.0.0",
+  "mode": "simulation",
+  "risk_tier": 1,
+  "mission_type": "red_team",
+  "classification_level": "UNCLASS",
+  "scope_id": "scope-webapp-assessment-001",
+  "scope_hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "approvals": [
+    {
+      "approver_id": "user-001",
+      "approver_name": "John Smith",
+      "role": "Security",
+      "timestamp": "2025-01-15T10:00:00Z",
+      "signature": "BASE64_SIGNATURE_HERE",
+      "scope_hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "valid": true,
+      "expiry": "2025-02-15T10:00:00Z"
+    },
+    {
+      "approver_id": "user-002",
+      "approver_name": "Jane Doe",
+      "role": "Product",
+      "timestamp": "2025-01-15T11:00:00Z",
+      "signature": "BASE64_SIGNATURE_HERE",
+      "scope_hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "valid": true,
+      "expiry": "2025-02-15T11:00:00Z"
+    }
+  ],
+  "budget_cap": {
+    "compute_hours": 50,
+    "api_calls": 5000,
+    "data_transfer_gb": 10,
+    "cost_usd": 500,
+    "soft_limit_percentage": 80
+  },
+  "valid_from": "2025-01-15T00:00:00Z",
+  "valid_to": "2025-02-15T23:59:59Z",
+  "roe": {
+    "allowed_assets": [
+      "web-server-01",
+      "web-server-02",
+      "api-gateway-01",
+      "db-server-01"
+    ],
+    "disallowed_assets": [
+      "prod-dc-01",
+      "backup-server-01",
+      "pki-server-01"
+    ],
+    "allowed_networks": [
+      "10.0.1.0/24",
+      "10.0.2.0/24"
+    ],
+    "allowed_tools": [
+      "nmap",
+      "nikto",
+      "sqlmap",
+      "burpsuite"
+    ],
+    "allowed_tool_categories": [
+      "reconnaissance",
+      "vulnerability_scan",
+      "exploitation"
+    ],
+    "disallowed_tools": [
+      "ransomware_sim"
+    ],
+    "time_restrictions": true,
+    "alert_footprint_cap": 20,
+    "blast_radius_cap": 60,
+    "lateral_movement_authorized": true,
+    "lateral_movement_targets": [
+      "db-server-01"
+    ],
+    "critical_systems_authorized": false,
+    "destructive_ops_authorized": false,
+    "data_exfiltration_authorized": true,
+    "persistence_authorized": true
+  },
+  "constraints": {
+    "max_concurrent_operations": 5,
+    "max_attack_depth": 8,
+    "require_human_approval_for": [
+      "credential_access",
+      "lateral_movement"
+    ],
+    "simulation_runs_required": 1000,
+    "forensic_completeness_threshold": 0.95
+  },
+  "metadata": {
+    "created_at": "2025-01-14T15:00:00Z",
+    "created_by": "security-team",
+    "description": "Web application security assessment for Q1 2025",
+    "tags": [
+      "webapp",
+      "quarterly-assessment",
+      "production-adjacent"
+    ]
+  }
+}
