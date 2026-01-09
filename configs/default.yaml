@@ -1,0 +1,79 @@
+# Frost Gate Spear - Default Configuration
+# Version: 1.0.0
+
+# Core Settings
+environment: simulation
+classification_level: UNCLASS
+base_path: "."
+
+# Logging
+log_level: INFO
+metrics_enabled: true
+tracing_enabled: true
+
+# Policy Configuration
+policy:
+  roe_policy_path: policy/roe_policy.rego
+  safety_policy_path: policy/safety_constraints.rego
+  mls_policy_path: policy/mls_policy.rego
+  envelope_schema_path: policy/policy_envelope.schema.json
+
+# Multi-Level Security
+mls:
+  rings_path: mls_rings/
+  default_ring: UNCLASS
+  cross_ring_enabled: false
+  ring_configs:
+    UNCLASS: mls_rings/unclass.yaml
+    CUI: mls_rings/cui.yaml
+    SECRET: mls_rings/secret.yaml
+    TOPSECRET: mls_rings/topsecret.yaml
+
+# Forensics
+forensics:
+  completeness_threshold: 0.95
+  replay_success_threshold: 0.95
+  worm_storage_enabled: true
+  external_timestamp_enabled: true
+  merkle_tree_enabled: true
+  hash_algorithm: SHA-256
+  log_retention_days: 730
+  storage_path: /var/log/frostgate/forensics
+
+# Target Impact Estimator
+tie:
+  default_blast_radius_cap: 50.0
+  impact_accuracy_threshold: 0.90
+  model_path: models/tie/
+  enable_ml_predictions: true
+
+# Planner
+planner:
+  max_plan_depth: 20
+  max_concurrent_branches: 5
+  enable_counterfactual: true
+  persona_bias_weight: 0.7
+
+# Federated Learning
+fl:
+  enabled: true
+  rings_path: fl_rings/
+  default_aggregation: fedavg
+  differential_privacy_enabled: true
+  default_epsilon: 1.0
+  default_delta: 1.0e-5
+  min_participants: 3
+
+# Governance
+governance:
+  require_approvals: true
+  sim_runs_required: 1000
+  policy_violations_allowed: 0
+  enable_budget_enforcement: true
+
+# RPC/Zero Trust
+rpc:
+  mtls_enabled: true
+  opa_check_enabled: true
+  per_service_identity: true
+  session_timeout_minutes: 30

@@ -1,0 +1,227 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://frostgate-spear.io/schemas/sbom-entry.json",
+  "title": "Frost Gate Spear SBOM Entry",
+  "description": "Software Bill of Materials entry schema for artifact tracking",
+  "type": "object",
+  "required": [
+    "artifact_id",
+    "artifact_type",
+    "name",
+    "version",
+    "hash",
+    "provenance",
+    "signature"
+  ],
+  "properties": {
+    "artifact_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for this artifact"
+    },
+    "artifact_type": {
+      "type": "string",
+      "enum": [
+        "binary",
+        "container",
+        "model",
+        "scenario",
+        "persona",
+        "policy",
+        "config",
+        "library"
+      ],
+      "description": "Type of artifact"
+    },
+    "name": {
+      "type": "string",
+      "description": "Human-readable name"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+(-[a-zA-Z0-9]+)?$",
+      "description": "Semantic version"
+    },
+    "description": {
+      "type": "string",
+      "description": "Description of the artifact"
+    },
+    "classification_level": {
+      "type": "string",
+      "enum": ["UNCLASS", "CUI", "SECRET", "TOPSECRET"],
+      "description": "Classification level of the artifact"
+    },
+    "hash": {
+      "type": "object",
+      "required": ["algorithm", "value"],
+      "properties": {
+        "algorithm": {
+          "type": "string",
+          "enum": ["SHA-256", "SHA-384", "SHA-512"]
+        },
+        "value": {
+          "type": "string",
+          "pattern": "^[a-f0-9]+$"
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["builder", "build_id", "build_timestamp"],
+      "properties": {
+        "builder": {
+          "type": "string",
+          "description": "Build system identifier"
+        },
+        "build_id": {
+          "type": "string",
+          "description": "Unique build identifier"
+        },
+        "build_timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Build timestamp"
+        },
+        "source_repo": {
+          "type": "string",
+          "format": "uri",
+          "description": "Source repository URL"
+        },
+        "source_commit": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$",
+          "description": "Source commit SHA"
+        },
+        "source_branch": {
+          "type": "string",
+          "description": "Source branch name"
+        },
+        "build_config": {
+          "type": "string",
+          "description": "Reference to build configuration"
+        },
+        "builder_version": {
+          "type": "string",
+          "description": "Version of build system"
+        },
+        "reproducible": {
+          "type": "boolean",
+          "description": "Whether build is reproducible"
+        }
+      }
+    },
+    "dependencies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "version": { "type": "string" },
+          "purl": { "type": "string" },
+          "hash": { "type": "string" },
+          "license": { "type": "string" },
+          "direct": { "type": "boolean" }
+        },
+        "required": ["name", "version"]
+      },
+      "description": "List of dependencies"
+    },
+    "vulnerabilities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "cve_id": { "type": "string" },
+          "severity": {
+            "type": "string",
+            "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "NONE"]
+          },
+          "status": {
+            "type": "string",
+            "enum": ["open", "mitigated", "accepted", "false_positive"]
+          },
+          "mitigation": { "type": "string" }
+        }
+      },
+      "description": "Known vulnerabilities"
+    },
+    "signature": {
+      "type": "object",
+      "required": ["algorithm", "value", "signer_id"],
+      "properties": {
+        "algorithm": {
+          "type": "string",
+          "enum": ["RSA-SHA256", "ECDSA-P384", "Ed25519"]
+        },
+        "value": {
+          "type": "string",
+          "description": "Base64-encoded signature"
+        },
+        "signer_id": {
+          "type": "string",
+          "description": "Identifier of signing key/authority"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "certificate_chain": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Certificate chain for verification"
+        }
+      }
+    },
+    "attestations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "slsa_provenance",
+              "vulnerability_scan",
+              "security_review",
+              "compliance_check",
+              "code_review"
+            ]
+          },
+          "attestation_id": { "type": "string" },
+          "timestamp": { "type": "string", "format": "date-time" },
+          "result": { "type": "string" },
+          "evidence_ref": { "type": "string" }
+        }
+      },
+      "description": "Attestations for the artifact"
+    },
+    "licenses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "spdx_id": { "type": "string" },
+          "name": { "type": "string" },
+          "url": { "type": "string", "format": "uri" }
+        }
+      },
+      "description": "Licenses applicable to this artifact"
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "created_at": { "type": "string", "format": "date-time" },
+        "created_by": { "type": "string" },
+        "updated_at": { "type": "string", "format": "date-time" },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    }
+  }
+}

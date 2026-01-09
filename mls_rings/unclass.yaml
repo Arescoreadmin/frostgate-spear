@@ -1,0 +1,150 @@
+# Frost Gate Spear - UNCLASS Ring Configuration
+# Classification: UNCLASSIFIED
+# Version: 1.0.0
+
+ring:
+  name: UNCLASS
+  level: 0
+  description: "Unclassified execution ring for non-sensitive operations"
+  color_code: "#00FF00"  # Green
+
+# Enclave Configuration
+enclave:
+  id: "enclave-unclass-001"
+  isolation:
+    network:
+      enabled: true
+      vlan_id: 100
+      firewall_policy: "unclass-default"
+      allowed_egress:
+        - "0.0.0.0/0"  # Internet access allowed
+      allowed_ingress:
+        - "10.0.0.0/8"
+    process:
+      enabled: true
+      namespace: "frostgate-unclass"
+      cgroup: "frostgate-unclass"
+      seccomp_profile: "default"
+    storage:
+      enabled: true
+      encryption: "AES-256-GCM"
+      path: "/data/unclass"
+      quota_gb: 500
+
+# Allowed Operations
+operations:
+  reconnaissance:
+    enabled: true
+    tools:
+      - nmap
+      - masscan
+      - shodan
+      - amass
+      - subfinder
+  vulnerability_scan:
+    enabled: true
+    tools:
+      - nessus
+      - openvas
+      - nikto
+      - nuclei
+  exploitation:
+    enabled: true
+    requires_approval: false
+    tools:
+      - metasploit
+      - cobalt_strike_community
+  credential_access:
+    enabled: true
+    requires_approval: false
+  lateral_movement:
+    enabled: true
+    requires_approval: true
+  persistence:
+    enabled: false
+  destructive:
+    enabled: false
+
+# Data Handling
+data:
+  classification_label: "UNCLASSIFIED"
+  marking_required: true
+  encryption_at_rest: true
+  encryption_in_transit: true
+  retention_days: 365
+  export_allowed: true
+  export_destinations:
+    - "CUI"  # Can upgrade to CUI
+
+# Audit Configuration
+audit:
+  enabled: true
+  log_level: "INFO"
+  worm_storage: true
+  external_timestamp: true
+  retention_days: 730
+  siem_integration: true
+  log_destination: "/var/log/frostgate/unclass"
+
+# Resource Limits
+resources:
+  cpu_cores: 16
+  memory_gb: 64
+  storage_gb: 500
+  network_bandwidth_mbps: 1000
+  concurrent_operations: 20
+
+# Promotion Requirements
+promotion:
+  to_lab:
+    sim_runs_required: 1000
+    policy_violations_allowed: 0
+    forensic_completeness: 0.95
+    approvals_required:
+      - Security
+  to_canary:
+    sim_runs_required: 1000
+    policy_violations_allowed: 0
+    forensic_completeness: 0.95
+    approvals_required:
+      - Security
+      - Product
+  to_production:
+    sim_runs_required: 1000
+    policy_violations_allowed: 0
+    forensic_completeness: 0.95
+    approvals_required:
+      - Security
+      - Product
+      - SRE
+
+# Adversary Personas Allowed
+personas:
+  enabled: true
+  allowed_categories:
+    - "cybercriminal"
+    - "hacktivist"
+    - "script_kiddie"
+  restricted_categories:
+    - "nation_state"
+    - "apt"
+    - "insider"
+
+# Federated Learning
+fl:
+  enabled: true
+  ring_isolation: true
+  gradient_aggregation: "fedavg"
+  differential_privacy:
+    enabled: true
+    epsilon: 1.0
+    delta: 1e-5
+  min_participants: 3
+  cross_ring_sharing: false
+
+# Compliance
+compliance:
+  frameworks:
+    - "NIST-CSF"
+    - "CIS-Controls"
+  controls_mapping: "configs/compliance/unclass_controls.yaml"

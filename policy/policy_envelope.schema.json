@@ -1,0 +1,337 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://frostgate-spear.io/schemas/policy-envelope.json",
+  "title": "Frost Gate Spear Policy Envelope",
+  "description": "Policy envelope schema for mission authorization and scope control",
+  "type": "object",
+  "required": [
+    "envelope_id",
+    "version",
+    "mode",
+    "risk_tier",
+    "mission_type",
+    "classification_level",
+    "scope_id",
+    "approvals",
+    "valid_from",
+    "valid_to"
+  ],
+  "properties": {
+    "envelope_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for this policy envelope"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Semantic version of the policy envelope"
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["simulation", "lab", "canary", "production", "mission"],
+      "description": "Execution mode for the mission"
+    },
+    "risk_tier": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 3,
+      "description": "Risk tier (1=low, 2=medium, 3=high requiring AO approval)"
+    },
+    "mission_type": {
+      "type": "string",
+      "enum": [
+        "reconnaissance",
+        "vulnerability_assessment",
+        "penetration_test",
+        "red_team",
+        "purple_team",
+        "adversary_emulation",
+        "training",
+        "simulation"
+      ],
+      "description": "Type of mission being authorized"
+    },
+    "classification_level": {
+      "type": "string",
+      "enum": ["UNCLASS", "CUI", "SECRET", "TOPSECRET"],
+      "description": "Classification level for the mission"
+    },
+    "scope_id": {
+      "type": "string",
+      "description": "Reference to the scope definition"
+    },
+    "scope_hash": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$",
+      "description": "SHA256 hash of the scope definition for integrity verification"
+    },
+    "approvals": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/Approval"
+      },
+      "minItems": 1,
+      "description": "List of approvals for this policy envelope"
+    },
+    "budget_cap": {
+      "type": "object",
+      "properties": {
+        "compute_hours": {
+          "type": "number",
+          "minimum": 0
+        },
+        "api_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "data_transfer_gb": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cost_usd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "soft_limit_percentage": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "default": 80
+        }
+      },
+      "description": "Budget constraints for the mission"
+    },
+    "valid_from": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Start of validity period (ISO 8601)"
+    },
+    "valid_to": {
+      "type": "string",
+      "format": "date-time",
+      "description": "End of validity period (ISO 8601)"
+    },
+    "roe": {
+      "$ref": "#/definitions/RulesOfEngagement"
+    },
+    "constraints": {
+      "$ref": "#/definitions/Constraints"
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "created_by": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "Approval": {
+      "type": "object",
+      "required": ["approver_id", "role", "timestamp", "signature"],
+      "properties": {
+        "approver_id": {
+          "type": "string",
+          "description": "Unique identifier of the approver"
+        },
+        "approver_name": {
+          "type": "string",
+          "description": "Human-readable name of the approver"
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "Product",
+            "Security",
+            "AO",
+            "GovCompliance",
+            "Legal",
+            "MissionOwner",
+            "RedTeamLead",
+            "SRE"
+          ],
+          "description": "Role of the approver"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Time of approval"
+        },
+        "signature": {
+          "type": "string",
+          "description": "Base64-encoded cryptographic signature"
+        },
+        "scope_hash": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "description": "Hash of scope at time of approval"
+        },
+        "valid": {
+          "type": "boolean",
+          "default": true
+        },
+        "expiry": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Expiration time of approval"
+        }
+      }
+    },
+    "RulesOfEngagement": {
+      "type": "object",
+      "properties": {
+        "allowed_assets": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "List of assets explicitly in scope"
+        },
+        "disallowed_assets": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "List of assets explicitly out of scope"
+        },
+        "allowed_networks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "CIDR ranges in scope"
+        },
+        "allowed_tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Specific tools permitted"
+        },
+        "allowed_tool_categories": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "reconnaissance",
+              "vulnerability_scan",
+              "exploitation",
+              "credential_access",
+              "discovery",
+              "lateral_movement",
+              "exfiltration",
+              "persistence",
+              "defense_evasion"
+            ]
+          },
+          "description": "Categories of tools permitted"
+        },
+        "disallowed_tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Specific tools prohibited"
+        },
+        "time_restrictions": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether time window restrictions are enforced"
+        },
+        "alert_footprint_cap": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum number of alerts allowed"
+        },
+        "blast_radius_cap": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Maximum impact score allowed (0-100)"
+        },
+        "lateral_movement_authorized": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether lateral movement is explicitly authorized"
+        },
+        "lateral_movement_targets": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Specific targets authorized for lateral movement"
+        },
+        "critical_systems_authorized": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether targeting critical systems is authorized"
+        },
+        "destructive_ops_authorized": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether destructive operations are authorized"
+        },
+        "data_exfiltration_authorized": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether data exfiltration (even simulated) is authorized"
+        },
+        "persistence_authorized": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether establishing persistence is authorized"
+        }
+      }
+    },
+    "Constraints": {
+      "type": "object",
+      "properties": {
+        "max_concurrent_operations": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 5
+        },
+        "max_attack_depth": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum steps in attack chain"
+        },
+        "require_human_approval_for": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Action types requiring human approval"
+        },
+        "simulation_runs_required": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 1000,
+          "description": "Number of SIM runs required before promotion"
+        },
+        "forensic_completeness_threshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.95,
+          "description": "Minimum forensic completeness score"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,241 @@
+{
+  "persona_id": "550e8400-e29b-41d4-a716-446655440001",
+  "version": "1.0.0",
+  "name": "APT29 / Cozy Bear",
+  "category": "nation_state_advanced",
+  "classification_level": "SECRET",
+  "description": "APT29, also known as Cozy Bear, The Dukes, and YTTRIUM, is a sophisticated threat actor attributed to Russia's Foreign Intelligence Service (SVR). Known for patient, long-term intelligence collection operations targeting government, diplomatic, think tank, healthcare, and energy sectors.",
+  "attribution": {
+    "country": "Russia",
+    "group_names": [
+      "APT29",
+      "Cozy Bear",
+      "The Dukes",
+      "YTTRIUM",
+      "Iron Hemlock",
+      "Grizzly Steppe"
+    ],
+    "mitre_groups": ["G0016"],
+    "active_since": "2008-01-01",
+    "targets": [
+      "Government",
+      "Diplomatic",
+      "Think Tanks",
+      "Healthcare",
+      "Energy",
+      "Technology"
+    ]
+  },
+  "capabilities": {
+    "sophistication": "elite",
+    "resources": "unlimited",
+    "persistence": "highly_persistent",
+    "stealth": "highly_stealthy",
+    "zero_days": true,
+    "custom_malware": true,
+    "supply_chain": true
+  },
+  "ttps": {
+    "preferred_tactics": [
+      "TA0001",
+      "TA0003",
+      "TA0005",
+      "TA0006",
+      "TA0007",
+      "TA0009",
+      "TA0011"
+    ],
+    "techniques": [
+      {
+        "technique_id": "T1566.001",
+        "name": "Spearphishing Attachment",
+        "preference_weight": 0.8,
+        "subtechniques": []
+      },
+      {
+        "technique_id": "T1566.002",
+        "name": "Spearphishing Link",
+        "preference_weight": 0.9,
+        "subtechniques": []
+      },
+      {
+        "technique_id": "T1195.002",
+        "name": "Supply Chain Compromise: Compromise Software Supply Chain",
+        "preference_weight": 0.7,
+        "subtechniques": []
+      },
+      {
+        "technique_id": "T1078",
+        "name": "Valid Accounts",
+        "preference_weight": 0.85,
+        "subtechniques": ["T1078.004"]
+      },
+      {
+        "technique_id": "T1550.001",
+        "name": "Use Alternate Authentication Material: Application Access Token",
+        "preference_weight": 0.9,
+        "subtechniques": []
+      },
+      {
+        "technique_id": "T1098",
+        "name": "Account Manipulation",
+        "preference_weight": 0.75,
+        "subtechniques": ["T1098.001", "T1098.002"]
+      },
+      {
+        "technique_id": "T1027",
+        "name": "Obfuscated Files or Information",
+        "preference_weight": 0.95,
+        "subtechniques": ["T1027.002", "T1027.005"]
+      },
+      {
+        "technique_id": "T1070",
+        "name": "Indicator Removal",
+        "preference_weight": 0.9,
+        "subtechniques": ["T1070.004", "T1070.006"]
+      },
+      {
+        "technique_id": "T1003",
+        "name": "OS Credential Dumping",
+        "preference_weight": 0.8,
+        "subtechniques": ["T1003.001", "T1003.006"]
+      },
+      {
+        "technique_id": "T1021.006",
+        "name": "Remote Services: Windows Remote Management",
+        "preference_weight": 0.85,
+        "subtechniques": []
+      },
+      {
+        "technique_id": "T1071.001",
+        "name": "Application Layer Protocol: Web Protocols",
+        "preference_weight": 0.9,
+        "subtechniques": []
+      },
+      {
+        "technique_id": "T1102",
+        "name": "Web Service",
+        "preference_weight": 0.85,
+        "subtechniques": ["T1102.002"]
+      }
+    ],
+    "tool_preferences": [
+      { "tool": "SUNBURST", "preference_weight": 0.9 },
+      { "tool": "TEARDROP", "preference_weight": 0.85 },
+      { "tool": "Cobalt Strike", "preference_weight": 0.8 },
+      { "tool": "Mimikatz", "preference_weight": 0.75 },
+      { "tool": "WellMess", "preference_weight": 0.7 },
+      { "tool": "WellMail", "preference_weight": 0.65 },
+      { "tool": "HAMMERTOSS", "preference_weight": 0.6 },
+      { "tool": "PowerDuke", "preference_weight": 0.55 }
+    ],
+    "kill_chain_preferences": {
+      "reconnaissance": {
+        "duration_bias": "extended",
+        "technique_preferences": ["T1591", "T1592", "T1589"]
+      },
+      "initial_access": {
+        "duration_bias": "patient",
+        "technique_preferences": ["T1566.002", "T1195.002", "T1078"]
+      },
+      "execution": {
+        "duration_bias": "cautious",
+        "technique_preferences": ["T1059.001", "T1204.002"]
+      },
+      "persistence": {
+        "duration_bias": "long_term",
+        "technique_preferences": ["T1098", "T1078", "T1505.003"]
+      },
+      "defense_evasion": {
+        "duration_bias": "continuous",
+        "technique_preferences": ["T1027", "T1070", "T1036"]
+      },
+      "collection": {
+        "duration_bias": "methodical",
+        "technique_preferences": ["T1114", "T1213", "T1560"]
+      },
+      "exfiltration": {
+        "duration_bias": "slow",
+        "technique_preferences": ["T1041", "T1567"]
+      }
+    }
+  },
+  "behavioral_profile": {
+    "working_hours": {
+      "timezone": "Europe/Moscow",
+      "start_hour": 8,
+      "end_hour": 18,
+      "working_days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+    },
+    "dwell_time": {
+      "min_days": 30,
+      "max_days": 730,
+      "typical_days": 180
+    },
+    "lateral_movement_style": "methodical",
+    "data_exfil_style": "low_and_slow",
+    "c2_patterns": {
+      "beacon_interval": "4h",
+      "jitter": 0.3,
+      "protocols": ["HTTPS", "DNS", "Cloud Services"]
+    }
+  },
+  "constraints": {
+    "can_override_roe": false,
+    "can_override_safety": false,
+    "can_override_policy": false,
+    "respects_blast_radius": true,
+    "respects_scope": true
+  },
+  "planner_biases": {
+    "technique_selection": {
+      "stealth": 0.95,
+      "speed": 0.3,
+      "reliability": 0.85
+    },
+    "target_prioritization": {
+      "high_value_targets": 0.9,
+      "low_hanging_fruit": 0.4,
+      "lateral_movement_potential": 0.8
+    },
+    "timing_preferences": {
+      "business_hours": 0.7,
+      "off_hours": 0.5,
+      "holidays": 0.3
+    },
+    "evasion_priorities": {
+      "av_evasion": 0.95,
+      "edr_evasion": 0.9,
+      "network_detection": 0.85,
+      "log_evasion": 0.8
+    }
+  },
+  "signature": {
+    "algorithm": "ECDSA-P384",
+    "value": "PLACEHOLDER_SIGNATURE_BASE64",
+    "signer_id": "frostgate-persona-authority",
+    "timestamp": "2025-01-01T00:00:00Z"
+  },
+  "attestation": {
+    "hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "provenance": {
+      "builder": "frostgate-persona-builder",
+      "build_id": "build-001",
+      "source_repo": "https://github.com/internal/adversary-personas",
+      "source_commit": "abc123"
+    },
+    "sbom_ref": "sbom/personas/apt29_cozy_bear.spdx.json"
+  },
+  "metadata": {
+    "created_at": "2025-01-01T00:00:00Z",
+    "created_by": "threat-intel-team",
+    "updated_at": "2025-01-01T00:00:00Z",
+    "reviewed_by": "security-review-board",
+    "review_date": "2025-01-01T00:00:00Z",
+    "tags": ["russia", "svr", "apt", "nation-state", "supply-chain"],
+    "references": [
+      "https://attack.mitre.org/groups/G0016/",
+      "https://www.fireeye.com/blog/threat-research/2020/12/evasive-attacker-leverages-solarwinds-supply-chain-compromises-with-sunburst-backdoor.html"
+    ]
+  }
+}

@@ -1,0 +1,244 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://frostgate-spear.io/schemas/attestation.json",
+  "title": "Frost Gate Spear Attestation",
+  "description": "Build attestation schema following SLSA provenance format",
+  "type": "object",
+  "required": [
+    "_type",
+    "subject",
+    "predicateType",
+    "predicate"
+  ],
+  "properties": {
+    "_type": {
+      "type": "string",
+      "const": "https://in-toto.io/Statement/v0.1",
+      "description": "In-toto statement type"
+    },
+    "subject": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "digest"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Subject name (artifact name)"
+          },
+          "digest": {
+            "type": "object",
+            "properties": {
+              "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+              "sha384": { "type": "string", "pattern": "^[a-f0-9]{96}$" },
+              "sha512": { "type": "string", "pattern": "^[a-f0-9]{128}$" }
+            },
+            "description": "Digest of the subject"
+          }
+        }
+      },
+      "minItems": 1,
+      "description": "Subjects this attestation applies to"
+    },
+    "predicateType": {
+      "type": "string",
+      "enum": [
+        "https://slsa.dev/provenance/v0.2",
+        "https://frostgate-spear.io/attestation/security-review/v1",
+        "https://frostgate-spear.io/attestation/compliance-check/v1",
+        "https://frostgate-spear.io/attestation/vulnerability-scan/v1"
+      ],
+      "description": "Type of predicate"
+    },
+    "predicate": {
+      "oneOf": [
+        { "$ref": "#/definitions/SLSAProvenance" },
+        { "$ref": "#/definitions/SecurityReview" },
+        { "$ref": "#/definitions/ComplianceCheck" },
+        { "$ref": "#/definitions/VulnerabilityScan" }
+      ]
+    }
+  },
+  "definitions": {
+    "SLSAProvenance": {
+      "type": "object",
+      "required": ["builder", "buildType", "invocation", "materials"],
+      "properties": {
+        "builder": {
+          "type": "object",
+          "required": ["id"],
+          "properties": {
+            "id": { "type": "string", "format": "uri" },
+            "version": { "type": "object" }
+          }
+        },
+        "buildType": {
+          "type": "string",
+          "format": "uri"
+        },
+        "invocation": {
+          "type": "object",
+          "properties": {
+            "configSource": {
+              "type": "object",
+              "properties": {
+                "uri": { "type": "string", "format": "uri" },
+                "digest": { "type": "object" },
+                "entryPoint": { "type": "string" }
+              }
+            },
+            "parameters": { "type": "object" },
+            "environment": { "type": "object" }
+          }
+        },
+        "buildConfig": { "type": "object" },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "buildInvocationId": { "type": "string" },
+            "buildStartedOn": { "type": "string", "format": "date-time" },
+            "buildFinishedOn": { "type": "string", "format": "date-time" },
+            "completeness": {
+              "type": "object",
+              "properties": {
+                "parameters": { "type": "boolean" },
+                "environment": { "type": "boolean" },
+                "materials": { "type": "boolean" }
+              }
+            },
+            "reproducible": { "type": "boolean" }
+          }
+        },
+        "materials": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "uri": { "type": "string", "format": "uri" },
+              "digest": { "type": "object" }
+            }
+          }
+        }
+      }
+    },
+    "SecurityReview": {
+      "type": "object",
+      "required": ["reviewer", "reviewDate", "result", "findings"],
+      "properties": {
+        "reviewer": {
+          "type": "object",
+          "properties": {
+            "id": { "type": "string" },
+            "name": { "type": "string" },
+            "role": { "type": "string" }
+          }
+        },
+        "reviewDate": { "type": "string", "format": "date-time" },
+        "reviewType": {
+          "type": "string",
+          "enum": ["red_team", "code_review", "architecture_review", "penetration_test"]
+        },
+        "result": {
+          "type": "string",
+          "enum": ["passed", "passed_with_findings", "failed"]
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "severity": { "type": "string" },
+              "description": { "type": "string" },
+              "remediation": { "type": "string" },
+              "status": { "type": "string" }
+            }
+          }
+        },
+        "toolCatalogValidated": { "type": "boolean" },
+        "personaROECompliant": { "type": "boolean" },
+        "mlsIsolationValidated": { "type": "boolean" }
+      }
+    },
+    "ComplianceCheck": {
+      "type": "object",
+      "required": ["framework", "checkDate", "result", "controls"],
+      "properties": {
+        "framework": {
+          "type": "string",
+          "enum": ["NIST-800-53", "NIST-800-171", "FedRAMP", "ICD-503", "FIPS-140-3", "STIG"]
+        },
+        "checkDate": { "type": "string", "format": "date-time" },
+        "result": {
+          "type": "string",
+          "enum": ["compliant", "partially_compliant", "non_compliant"]
+        },
+        "controls": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "control_id": { "type": "string" },
+              "status": { "type": "string" },
+              "evidence": { "type": "string" }
+            }
+          }
+        },
+        "poams": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "description": { "type": "string" },
+              "due_date": { "type": "string", "format": "date" }
+            }
+          }
+        }
+      }
+    },
+    "VulnerabilityScan": {
+      "type": "object",
+      "required": ["scanner", "scanDate", "result", "vulnerabilities"],
+      "properties": {
+        "scanner": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "version": { "type": "string" },
+            "database_version": { "type": "string" }
+          }
+        },
+        "scanDate": { "type": "string", "format": "date-time" },
+        "result": {
+          "type": "string",
+          "enum": ["clean", "vulnerabilities_found", "scan_failed"]
+        },
+        "vulnerabilities": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "cve_id": { "type": "string" },
+              "cvss_score": { "type": "number" },
+              "severity": { "type": "string" },
+              "package": { "type": "string" },
+              "installed_version": { "type": "string" },
+              "fixed_version": { "type": "string" },
+              "status": { "type": "string" }
+            }
+          }
+        },
+        "summary": {
+          "type": "object",
+          "properties": {
+            "critical": { "type": "integer" },
+            "high": { "type": "integer" },
+            "medium": { "type": "integer" },
+            "low": { "type": "integer" }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,214 @@
+# Frost Gate Spear - CUI Ring Configuration
+# Classification: Controlled Unclassified Information
+# Version: 1.0.0
+
+ring:
+  name: CUI
+  level: 1
+  description: "Controlled Unclassified Information execution ring"
+  color_code: "#FFFF00"  # Yellow
+
+# Enclave Configuration
+enclave:
+  id: "enclave-cui-001"
+  isolation:
+    network:
+      enabled: true
+      vlan_id: 200
+      firewall_policy: "cui-restricted"
+      allowed_egress:
+        - "10.0.0.0/8"
+        - "172.16.0.0/12"
+      blocked_egress:
+        - "0.0.0.0/0"  # No direct internet
+      proxy_required: true
+      proxy_endpoint: "proxy.cui.internal:8443"
+      allowed_ingress:
+        - "10.100.0.0/16"
+    process:
+      enabled: true
+      namespace: "frostgate-cui"
+      cgroup: "frostgate-cui"
+      seccomp_profile: "cui-hardened"
+      capabilities_drop:
+        - "CAP_NET_RAW"
+        - "CAP_SYS_ADMIN"
+    storage:
+      enabled: true
+      encryption: "AES-256-GCM"
+      key_management: "HSM"
+      path: "/data/cui"
+      quota_gb: 250
+      fips_validated: true
+
+# Allowed Operations
+operations:
+  reconnaissance:
+    enabled: true
+    requires_approval: false
+    tools:
+      - nmap
+      - masscan
+      - amass
+  vulnerability_scan:
+    enabled: true
+    requires_approval: false
+    tools:
+      - nessus
+      - openvas
+      - qualys
+  exploitation:
+    enabled: true
+    requires_approval: true
+    approval_roles:
+      - Security
+      - MissionOwner
+    tools:
+      - metasploit
+      - cobalt_strike
+  credential_access:
+    enabled: true
+    requires_approval: true
+    approval_roles:
+      - Security
+  lateral_movement:
+    enabled: true
+    requires_approval: true
+    approval_roles:
+      - Security
+      - MissionOwner
+  persistence:
+    enabled: true
+    requires_approval: true
+    approval_roles:
+      - Security
+      - AO
+  destructive:
+    enabled: false
+
+# Data Handling
+data:
+  classification_label: "CUI"
+  marking_required: true
+  banner: "CONTROLLED UNCLASSIFIED INFORMATION"
+  encryption_at_rest: true
+  encryption_in_transit: true
+  key_rotation_days: 90
+  retention_days: 730
+  export_allowed: true
+  export_destinations:
+    - "SECRET"  # Can upgrade to SECRET
+  downgrade_allowed: true
+  downgrade_requires:
+    - sanitization: true
+    - approval_role: "Security"
+    - audit_logged: true
+
+# Audit Configuration
+audit:
+  enabled: true
+  log_level: "DEBUG"
+  worm_storage: true
+  external_timestamp: true
+  timestamp_authority: "time.nist.gov"
+  retention_days: 2555  # 7 years
+  siem_integration: true
+  log_destination: "/var/log/frostgate/cui"
+  merkle_tree: true
+  hash_algorithm: "SHA-256"
+
+# Resource Limits
+resources:
+  cpu_cores: 32
+  memory_gb: 128
+  storage_gb: 250
+  network_bandwidth_mbps: 500
+  concurrent_operations: 10
+
+# Promotion Requirements
+promotion:
+  to_lab:
+    sim_runs_required: 1000
+    policy_violations_allowed: 0
+    forensic_completeness: 0.95
+    replay_success: 0.95
+    approvals_required:
+      - Security
+      - GovCompliance
+  to_canary:
+    sim_runs_required: 1000
+    policy_violations_allowed: 0
+    forensic_completeness: 0.95
+    replay_success: 0.95
+    approvals_required:
+      - Security
+      - GovCompliance
+      - Product
+  to_production:
+    sim_runs_required: 1000
+    policy_violations_allowed: 0
+    forensic_completeness: 0.95
+    replay_success: 0.95
+    approvals_required:
+      - Security
+      - GovCompliance
+      - Product
+      - SRE
+  to_mission:
+    sim_runs_required: 1000
+    policy_violations_allowed: 0
+    forensic_completeness: 0.95
+    replay_success: 0.95
+    tie_validation: true
+    approvals_required:
+      - Security
+      - GovCompliance
+      - MissionOwner
+      - AO
+
+# Adversary Personas Allowed
+personas:
+  enabled: true
+  signature_required: true
+  allowed_categories:
+    - "cybercriminal"
+    - "hacktivist"
+    - "script_kiddie"
+    - "nation_state_lite"
+  restricted_categories:
+    - "apt_full"
+    - "insider_privileged"
+  persona_validation:
+    hash_verification: true
+    signature_verification: true
+
+# Federated Learning
+fl:
+  enabled: true
+  ring_isolation: true
+  gradient_aggregation: "secure_aggregation"
+  differential_privacy:
+    enabled: true
+    epsilon: 0.5
+    delta: 1e-6
+  min_participants: 5
+  cross_ring_sharing: false
+  model_encryption: true
+
+# Zero Trust
+zero_trust:
+  enabled: true
+  mtls_required: true
+  per_service_identity: true
+  opa_policy_check: true
+  session_timeout_minutes: 30
+  mfa_required: true
+
+# Compliance
+compliance:
+  frameworks:
+    - "NIST-800-171"
+    - "NIST-800-53"
+    - "CMMC-Level-2"
+  controls_mapping: "configs/compliance/cui_controls.yaml"
+  continuous_monitoring: true
