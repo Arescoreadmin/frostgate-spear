@@ -156,6 +156,217 @@ CREATE TRIGGER trigger_budget_usage_updated_at
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at();
 
--- Grant permissions (adjust as needed)
+-- ============================================
+-- RED LINE EVENTS TABLE (Critical Security)
+-- ============================================
+CREATE TABLE IF NOT EXISTS red_line_events (
+    event_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    red_line VARCHAR(100) NOT NULL,
+    attempted_action VARCHAR(255) NOT NULL,
+    actor VARCHAR(255),
+    mission_id UUID REFERENCES missions(mission_id),
+    blocked BOOLEAN DEFAULT TRUE,
+    severity VARCHAR(20) DEFAULT 'CRITICAL',
+    details JSONB,
+    hmac_signature VARCHAR(128),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_red_line_created_at ON red_line_events(created_at);
+CREATE INDEX IF NOT EXISTS idx_red_line_type ON red_line_events(red_line);
+
+-- ============================================
+-- MLS OPERATIONS TABLE
+-- ============================================
+CREATE TABLE IF NOT EXISTS mls_operations (
+    operation_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    operation_type VARCHAR(50) NOT NULL,
+    source_ring VARCHAR(20) NOT NULL,
+    target_ring VARCHAR(20) NOT NULL,
+    allowed BOOLEAN NOT NULL,
+    actor VARCHAR(255),
+    resource VARCHAR(255),
+    details JSONB,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_mls_ops_rings ON mls_operations(source_ring, target_ring);
+
+-- ============================================
+-- PERSONA VALIDATION TABLE
+-- ============================================
+CREATE TABLE IF NOT EXISTS persona_validations (
+    validation_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    persona_id UUID NOT NULL,
+    persona_name VARCHAR(255),
+    category VARCHAR(100),
+    classification_level VARCHAR(20) NOT NULL,
+    signature_valid BOOLEAN,
+    attestation_valid BOOLEAN,
+    constraints_valid BOOLEAN,
+    overall_valid BOOLEAN NOT NULL,
+    errors JSONB,
+    validated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_persona_valid_at ON persona_validations(validated_at);
+
+-- ============================================
+-- SBOM/SLSA VERIFICATION TABLE
+-- ============================================
+CREATE TABLE IF NOT EXISTS artifact_verifications (
+    verification_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    artifact_id UUID NOT NULL,
+    artifact_type VARCHAR(50) NOT NULL,
+    artifact_name VARCHAR(255) NOT NULL,
+    sbom_valid BOOLEAN,
+    sbom_format VARCHAR(50),
+    provenance_valid BOOLEAN,
+    slsa_level INTEGER,
+    signature_valid BOOLEAN,
+    attestation_valid BOOLEAN,
+    license_compliant BOOLEAN,
+    prohibited_licenses JSONB,
+    overall_valid BOOLEAN NOT NULL,
+    verification_hash VARCHAR(128),
+    verified_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_artifact_ver_at ON artifact_verifications(verified_at);
+
+-- ============================================
+-- PROMOTION ATTESTATIONS TABLE
+-- ============================================
+CREATE TABLE IF NOT EXISTS promotion_attestations (
+    attestation_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    artifact_id UUID NOT NULL,
+    from_environment VARCHAR(50) NOT NULL,
+    to_environment VARCHAR(50) NOT NULL,
+    ring VARCHAR(20) NOT NULL,
+    all_gates_passed BOOLEAN NOT NULL,
+    security_gate JSONB,
+    safety_gate JSONB,
+    forensic_gate JSONB,
+    impact_gate JSONB,
+    performance_gate JSONB,
+    ops_gate JSONB,
+    fl_ring_gate JSONB,
+    approver_id VARCHAR(255),
+    approver_signature TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_promotion_att_at ON promotion_attestations(created_at);
+
+-- ============================================
+-- HMAC CHAIN TABLE (Tamper Evidence)
+-- ============================================
+CREATE TABLE IF NOT EXISTS hmac_chain (
+    chain_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    mission_id UUID REFERENCES missions(mission_id),
+    sequence_number BIGINT NOT NULL,
+    event_type VARCHAR(100) NOT NULL,
+    data_hash VARCHAR(128) NOT NULL,
+    previous_hmac VARCHAR(128),
+    current_hmac VARCHAR(128) NOT NULL,
+    timestamp_rfc3161 TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE (mission_id, sequence_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_hmac_mission ON hmac_chain(mission_id);
+
+-- ============================================
+-- WORM PROTECTION FOR FORENSIC RECORDS
+-- ============================================
+-- Prevent modification of forensic records (Write Once Read Many)
+CREATE OR REPLACE FUNCTION prevent_forensic_modification()
+RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'Forensic records are write-once and cannot be modified or deleted';
+END;
+$$ LANGUAGE plpgsql;
+
+-- Create triggers if they don't exist
+DROP TRIGGER IF EXISTS trigger_forensic_no_update ON forensic_records;
+CREATE TRIGGER trigger_forensic_no_update
+    BEFORE UPDATE ON forensic_records
+    FOR EACH ROW
+    EXECUTE FUNCTION prevent_forensic_modification();
+
+DROP TRIGGER IF EXISTS trigger_forensic_no_delete ON forensic_records;
+CREATE TRIGGER trigger_forensic_no_delete
+    BEFORE DELETE ON forensic_records
+    FOR EACH ROW
+    EXECUTE FUNCTION prevent_forensic_modification();
+
+-- ============================================
+-- WORM PROTECTION FOR AUDIT LOG
+-- ============================================
+DROP TRIGGER IF EXISTS trigger_audit_no_update ON audit_log;
+CREATE TRIGGER trigger_audit_no_update
+    BEFORE UPDATE ON audit_log
+    FOR EACH ROW
+    EXECUTE FUNCTION prevent_forensic_modification();
+
+DROP TRIGGER IF EXISTS trigger_audit_no_delete ON audit_log;
+CREATE TRIGGER trigger_audit_no_delete
+    BEFORE DELETE ON audit_log
+    FOR EACH ROW
+    EXECUTE FUNCTION prevent_forensic_modification();
+
+-- ============================================
+-- WORM PROTECTION FOR RED LINE EVENTS
+-- ============================================
+DROP TRIGGER IF EXISTS trigger_red_line_no_update ON red_line_events;
+CREATE TRIGGER trigger_red_line_no_update
+    BEFORE UPDATE ON red_line_events
+    FOR EACH ROW
+    EXECUTE FUNCTION prevent_forensic_modification();
+
+DROP TRIGGER IF EXISTS trigger_red_line_no_delete ON red_line_events;
+CREATE TRIGGER trigger_red_line_no_delete
+    BEFORE DELETE ON red_line_events
+    FOR EACH ROW
+    EXECUTE FUNCTION prevent_forensic_modification();
+
+-- ============================================
+-- COMPLIANCE VIEWS
+-- ============================================
+
+-- View for gate pass rates
+CREATE OR REPLACE VIEW gate_pass_rates AS
+SELECT
+    gate_name,
+    COUNT(*) AS total_validations,
+    SUM(CASE WHEN passed THEN 1 ELSE 0 END) AS passed_count,
+    ROUND(100.0 * SUM(CASE WHEN passed THEN 1 ELSE 0 END) / COUNT(*), 2) AS pass_rate
+FROM gate_results
+GROUP BY gate_name;
+
+-- View for red line violations by type
+CREATE OR REPLACE VIEW red_line_summary AS
+SELECT
+    red_line,
+    COUNT(*) AS total_attempts,
+    SUM(CASE WHEN blocked THEN 1 ELSE 0 END) AS blocked_count,
+    MAX(created_at) AS last_attempt
+FROM red_line_events
+GROUP BY red_line;
+
+-- View for MLS violation attempts
+CREATE OR REPLACE VIEW mls_violation_attempts AS
+SELECT
+    source_ring,
+    target_ring,
+    operation_type,
+    COUNT(*) AS attempts,
+    SUM(CASE WHEN NOT allowed THEN 1 ELSE 0 END) AS violations
+FROM mls_operations
+GROUP BY source_ring, target_ring, operation_type;
+
+-- ============================================
+-- GRANT PERMISSIONS
+-- ============================================
 GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO frostgate;
 GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO frostgate;

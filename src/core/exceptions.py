@@ -303,3 +303,164 @@ class RedLineViolationError(FrostGateError):
         )
         self.red_line = red_line
         self.action = action
+
+
+class PersonaValidationError(FrostGateError):
+    """Raised when persona validation fails."""
+
+    def __init__(
+        self,
+        message: str,
+        persona_id: Optional[str] = None,
+        validation_errors: Optional[List[str]] = None,
+    ):
+        super().__init__(
+            message,
+            code="PERSONA_VALIDATION_ERROR",
+            details={
+                "persona_id": persona_id,
+                "validation_errors": validation_errors or [],
+            },
+        )
+        self.persona_id = persona_id
+        self.validation_errors = validation_errors or []
+
+
+class PersonaConstraintViolationError(FrostGateError):
+    """
+    Raised when a persona attempts to override immutable constraints.
+
+    This is a CRITICAL security violation - personas CANNOT override
+    ROE, safety, or policy constraints.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        constraint: str,
+        attempted_value: Any,
+        required_value: Any,
+    ):
+        super().__init__(
+            message,
+            code="PERSONA_CONSTRAINT_VIOLATION",
+            details={
+                "constraint": constraint,
+                "attempted_value": attempted_value,
+                "required_value": required_value,
+                "severity": "CRITICAL",
+            },
+        )
+        self.constraint = constraint
+        self.attempted_value = attempted_value
+        self.required_value = required_value
+
+
+class PersonaSignatureError(FrostGateError):
+    """Raised when persona signature validation fails."""
+
+    def __init__(
+        self,
+        message: str,
+        persona_id: Optional[str] = None,
+        signer_id: Optional[str] = None,
+    ):
+        super().__init__(
+            message,
+            code="PERSONA_SIGNATURE_ERROR",
+            details={
+                "persona_id": persona_id,
+                "signer_id": signer_id,
+            },
+        )
+        self.persona_id = persona_id
+        self.signer_id = signer_id
+
+
+class PersonaClassificationError(FrostGateError):
+    """Raised when persona classification requirements are not met."""
+
+    def __init__(
+        self,
+        message: str,
+        persona_id: Optional[str] = None,
+        required_ring: Optional[str] = None,
+        current_ring: Optional[str] = None,
+    ):
+        super().__init__(
+            message,
+            code="PERSONA_CLASSIFICATION_ERROR",
+            details={
+                "persona_id": persona_id,
+                "required_ring": required_ring,
+                "current_ring": current_ring,
+            },
+        )
+        self.persona_id = persona_id
+        self.required_ring = required_ring
+        self.current_ring = current_ring
+
+
+class CrossRingContaminationError(MLSViolationError):
+    """Raised when cross-ring data contamination is detected."""
+
+    def __init__(
+        self,
+        message: str,
+        source_ring: str,
+        target_ring: str,
+        data_type: Optional[str] = None,
+    ):
+        super().__init__(
+            message,
+            source_ring=source_ring,
+            target_ring=target_ring,
+            operation="cross_ring_transfer",
+        )
+        self.code = "CROSS_RING_CONTAMINATION"
+        self.data_type = data_type
+
+
+class SBOMValidationError(FrostGateError):
+    """Raised when SBOM validation fails."""
+
+    def __init__(
+        self,
+        message: str,
+        artifact_id: Optional[str] = None,
+        missing_components: Optional[List[str]] = None,
+    ):
+        super().__init__(
+            message,
+            code="SBOM_VALIDATION_ERROR",
+            details={
+                "artifact_id": artifact_id,
+                "missing_components": missing_components or [],
+            },
+        )
+        self.artifact_id = artifact_id
+        self.missing_components = missing_components or []
+
+
+class ProvenanceValidationError(FrostGateError):
+    """Raised when SLSA provenance validation fails."""
+
+    def __init__(
+        self,
+        message: str,
+        artifact_id: Optional[str] = None,
+        slsa_level: Optional[int] = None,
+        required_level: int = 3,
+    ):
+        super().__init__(
+            message,
+            code="PROVENANCE_VALIDATION_ERROR",
+            details={
+                "artifact_id": artifact_id,
+                "slsa_level": slsa_level,
+                "required_level": required_level,
+            },
+        )
+        self.artifact_id = artifact_id
+        self.slsa_level = slsa_level
+        self.required_level = required_level
