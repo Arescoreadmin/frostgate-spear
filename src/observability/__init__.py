@@ -1,29 +1,193 @@
 """
 Frost Gate Spear Observability
 
-Logging, metrics, and tracing infrastructure.
+Government-grade logging, metrics, and tracing infrastructure.
+
+Features:
+- Structured JSON logging with classification awareness
+- SIEM-compatible output (CEF/LEEF)
+- Prometheus metrics with security labels
+- OpenTelemetry-compatible distributed tracing
+- Classification-aware log routing
+- NIST 800-53 AU control compliance
 """
 
 import logging
 import logging.handlers
 import json
+import os
+import socket
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Dict, Generator, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, Generator, List, Optional, Union
 from uuid import UUID, uuid4
 
 from ..core.config import Config
 
 
-# Structured logging formatter
+# Classification levels for log routing
+CLASSIFICATION_LEVELS = {
+    "UNCLASS": 0,
+    "CUI": 1,
+    "SECRET": 2,
+    "TOPSECRET": 3,
+}
+
+
+# Structured logging formatter with government-grade fields
+class GovernmentJSONFormatter(logging.Formatter):
+    """
+    Government-grade JSON log formatter.
+
+    Includes all fields required for:
+    - NIST 800-53 AU controls
+    - STIG compliance
+    - FedRAMP audit requirements
+    """
+
+    def __init__(
+        self,
+        classification_level: str = "UNCLASS",
+        hostname: Optional[str] = None,
+        service_name: str = "frostgate-spear",
+    ):
+        super().__init__()
+        self.classification_level = classification_level
+        self.hostname = hostname or socket.gethostname()
+        self.service_name = service_name
+        self.pid = os.getpid()
+
+    def format(self, record: logging.LogRecord) -> str:
+        # Core timestamp in ISO 8601 with timezone
+        timestamp = datetime.now(timezone.utc)
+
+        log_data = {
+            # Temporal fields
+            "timestamp": timestamp.isoformat(),
+            "timestamp_epoch_ms": int(timestamp.timestamp() * 1000),
+
+            # Event identification
+            "event_id": getattr(record, "event_id", str(uuid4())),
+            "level": record.levelname,
+            "level_num": record.levelno,
+            "logger": record.name,
+
+            # Message
+            "message": record.getMessage(),
+
+            # Source location
+            "source": {
+                "module": record.module,
+                "function": record.funcName,
+                "file": record.pathname,
+                "line": record.lineno,
+            },
+
+            # System context
+            "system": {
+                "hostname": self.hostname,
+                "service": self.service_name,
+                "pid": self.pid,
+                "thread": record.thread,
+                "thread_name": record.threadName,
+            },
+
+            # Classification
+            "classification": {
+                "level": getattr(record, "classification", self.classification_level),
+                "marking": self._get_classification_marking(
+                    getattr(record, "classification", self.classification_level)
+                ),
+            },
+        }
+
+        # Mission context
+        if hasattr(record, "mission_id"):
+            log_data["mission"] = {
+                "id": record.mission_id,
+                "envelope_id": getattr(record, "envelope_id", None),
+                "scenario_hash": getattr(record, "scenario_hash", None),
+            }
+
+        # Action context
+        if hasattr(record, "action_id"):
+            log_data["action"] = {
+                "id": record.action_id,
+                "type": getattr(record, "action_type", None),
+                "target": getattr(record, "target", None),
+            }
+
+        # Tracing context
+        if hasattr(record, "trace_id") or hasattr(record, "span_id"):
+            log_data["trace"] = {
+                "trace_id": getattr(record, "trace_id", None),
+                "span_id": getattr(record, "span_id", None),
+                "parent_span_id": getattr(record, "parent_span_id", None),
+            }
+
+        # Security context
+        if hasattr(record, "actor_id"):
+            log_data["security"] = {
+                "actor_id": record.actor_id,
+                "actor_type": getattr(record, "actor_type", None),
+                "client_ip": getattr(record, "client_ip", None),
+                "client_cert": getattr(record, "client_cert", None),
+            }
+
+        # Correlation
+        if hasattr(record, "correlation_id"):
+            log_data["correlation_id"] = record.correlation_id
+
+        # Ring/MLS context
+        if hasattr(record, "ring"):
+            log_data["mls"] = {
+                "ring": record.ring,
+                "source_ring": getattr(record, "source_ring", None),
+                "target_ring": getattr(record, "target_ring", None),
+            }
+
+        # Audit-specific fields
+        if hasattr(record, "audit_category"):
+            log_data["audit"] = {
+                "category": record.audit_category,
+                "outcome": getattr(record, "audit_outcome", None),
+                "sequence": getattr(record, "audit_sequence", None),
+            }
+
+        # Exception info
+        if record.exc_info:
+            log_data["exception"] = {
+                "type": record.exc_info[0].__name__ if record.exc_info[0] else None,
+                "message": str(record.exc_info[1]) if record.exc_info[1] else None,
+                "traceback": self.formatException(record.exc_info),
+            }
+
+        # Extra data
+        if hasattr(record, "extra_data"):
+            log_data["data"] = record.extra_data
+
+        return json.dumps(log_data, default=str)
+
+    def _get_classification_marking(self, level: str) -> str:
+        """Get proper classification banner."""
+        markings = {
+            "UNCLASS": "UNCLASSIFIED",
+            "CUI": "CUI//SP-CTI",
+            "SECRET": "SECRET//NOFORN",
+            "TOPSECRET": "TOP SECRET//SI//NOFORN",
+        }
+        return markings.get(level, "UNCLASSIFIED")
+
+
+# Legacy formatter for backwards compatibility
 class JSONFormatter(logging.Formatter):
     """JSON log formatter for structured logging."""
 
     def format(self, record: logging.LogRecord) -> str:
         log_data = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
