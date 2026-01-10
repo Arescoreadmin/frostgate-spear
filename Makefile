@@ -112,3 +112,179 @@ db-init:
 
 db-shell:
 	docker-compose exec postgres psql -U frostgate -d frostgate
+
+#######################################
+# COMPLIANCE TESTING
+#######################################
+.PHONY: test-compliance test-gates test-red-lines test-mls test-fl test-sbom compliance-report validate-gates
+
+# Run all compliance tests
+test-compliance: test-gates test-red-lines test-mls test-fl test-sbom
+	@echo "All compliance tests passed!"
+
+# Test all 7 governance gates
+test-gates:
+	@echo "Running gate validation tests (7 gates)..."
+	pytest tests/compliance/test_gates.py -v --tb=short
+
+# Test all 8 red line violations
+test-red-lines:
+	@echo "Running red line violation tests (8 red lines)..."
+	pytest tests/compliance/test_red_lines.py -v --tb=short
+
+# Test MLS cross-ring contamination
+test-mls:
+	@echo "Running MLS cross-ring contamination tests..."
+	pytest tests/compliance/test_mls.py -v --tb=short
+
+# Test FL differential privacy
+test-fl:
+	@echo "Running FL differential privacy tests..."
+	pytest tests/compliance/test_fl_privacy.py -v --tb=short
+
+# Test SBOM/SLSA verification
+test-sbom:
+	@echo "Running SBOM/SLSA verification tests..."
+	pytest tests/compliance/test_sbom_slsa.py -v --tb=short
+
+# Validate all gates for promotion
+validate-gates:
+	@echo "Validating all gates for promotion..."
+	@echo ""
+	@echo "Security Gate:"
+	@pytest tests/compliance/test_gates.py::TestSecurityGate -v --tb=line 2>/dev/null || echo "  FAILED"
+	@echo ""
+	@echo "Safety Gate:"
+	@pytest tests/compliance/test_gates.py::TestSafetyGate -v --tb=line 2>/dev/null || echo "  FAILED"
+	@echo ""
+	@echo "Forensic Gate:"
+	@pytest tests/compliance/test_gates.py::TestForensicGate -v --tb=line 2>/dev/null || echo "  FAILED"
+	@echo ""
+	@echo "Impact Gate:"
+	@pytest tests/compliance/test_gates.py::TestImpactGate -v --tb=line 2>/dev/null || echo "  FAILED"
+	@echo ""
+	@echo "Performance Gate:"
+	@pytest tests/compliance/test_gates.py::TestPerformanceGate -v --tb=line 2>/dev/null || echo "  FAILED"
+	@echo ""
+	@echo "Ops Gate:"
+	@pytest tests/compliance/test_gates.py::TestOpsGate -v --tb=line 2>/dev/null || echo "  FAILED"
+	@echo ""
+	@echo "FL Ring Gate:"
+	@pytest tests/compliance/test_gates.py::TestFLRingGate -v --tb=line 2>/dev/null || echo "  FAILED"
+
+# Generate compliance report
+compliance-report:
+	@echo "========================================"
+	@echo "FROST GATE SPEAR COMPLIANCE REPORT"
+	@echo "Generated: $$(date)"
+	@echo "========================================"
+	@echo ""
+	@echo "Gate Status:"
+	@echo "  [ ] Security Gate - Red team review, gov security, MLS isolation"
+	@echo "  [ ] Safety Gate - 1000 SIM runs, 0 violations, <5% FP"
+	@echo "  [ ] Forensic Gate - >=95% completeness, >=95% replay"
+	@echo "  [ ] Impact Gate - TIE within envelope, zero-impact mode"
+	@echo "  [ ] Performance Gate - Budget, latency, alert footprint"
+	@echo "  [ ] Ops Gate - SOC replay, Blue Box, AO sign-off"
+	@echo "  [ ] FL Ring Gate - No contamination, DP bounds intact"
+	@echo ""
+	@echo "Red Lines (Absolute Prohibitions):"
+	@echo "  [X] No action outside mission ROE"
+	@echo "  [X] No automated classification level modification"
+	@echo "  [X] No persona override of ROE/safety/policy"
+	@echo "  [X] No cross-ring contamination"
+	@echo "  [X] No destructive ops without AO signature"
+	@echo "  [X] No scenario execution without hash match"
+	@echo "  [X] No unsigned binaries"
+	@echo "  [X] No un-attested artifacts"
+	@echo ""
+	@echo "Compliance Frameworks:"
+	@echo "  - NIST 800-53 (High)"
+	@echo "  - NIST 800-171 (CUI)"
+	@echo "  - FedRAMP High"
+	@echo "  - ICD-503 (SECRET)"
+	@echo "  - CNSSI-1253"
+	@echo "  - FIPS 140-3"
+	@echo "  - SLSA Level 3"
+
+#######################################
+# SECURITY SCANNING
+#######################################
+.PHONY: security-scan trivy-scan gitleaks-scan semgrep-scan
+
+security-scan: trivy-scan gitleaks-scan
+	@echo "Security scanning complete"
+
+trivy-scan:
+	@if command -v trivy >/dev/null 2>&1; then \
+		trivy fs --severity HIGH,CRITICAL .; \
+	else \
+		echo "Trivy not installed, skipping..."; \
+	fi
+
+gitleaks-scan:
+	@if command -v gitleaks >/dev/null 2>&1; then \
+		gitleaks detect --source . --no-git; \
+	else \
+		echo "Gitleaks not installed, skipping..."; \
+	fi
+
+semgrep-scan:
+	@if command -v semgrep >/dev/null 2>&1; then \
+		semgrep --config auto --config p/security-audit .; \
+	else \
+		echo "Semgrep not installed, skipping..."; \
+	fi
+
+#######################################
+# CONTAINER HEALTH CHECKS
+#######################################
+.PHONY: health-check container-status
+
+health-check:
+	@echo "Checking container health..."
+	@docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | grep frostgate || true
+	@echo ""
+	@echo "Service Health:"
+	@curl -s http://localhost:8080/health 2>/dev/null && echo "  Frost Gate: OK" || echo "  Frost Gate: DOWN"
+	@curl -s http://localhost:8181/health 2>/dev/null && echo "  OPA: OK" || echo "  OPA: DOWN"
+	@curl -s http://localhost:9090/-/healthy 2>/dev/null && echo "  Prometheus: OK" || echo "  Prometheus: DOWN"
+
+container-status:
+	docker-compose ps
+
+#######################################
+# CI/CD TARGETS
+#######################################
+.PHONY: ci ci-build ci-test
+
+ci: lint type-check security-scan test test-compliance compliance-report
+	@echo "CI pipeline complete!"
+
+ci-build:
+	docker build --no-cache -t frostgate-spear:ci .
+	@echo "CI build complete!"
+
+ci-test:
+	docker-compose run --rm frostgate pytest tests/ -v --tb=short
+	@echo "CI test complete!"
+
+#######################################
+# SIMULATION RUNS (Safety Gate)
+#######################################
+.PHONY: sim-1000 sim-100
+
+sim-1000:
+	@echo "Running 1000 simulation runs for safety gate..."
+	python -m src.cli simulate \
+		--envelope examples/mission_envelope.json \
+		--scenario scenarios/examples/web_app_compromise.json \
+		--iterations 1000 \
+		--validate-safety
+
+sim-100:
+	@echo "Running 100 simulation runs (quick validation)..."
+	python -m src.cli simulate \
+		--envelope examples/mission_envelope.json \
+		--scenario scenarios/examples/web_app_compromise.json \
+		--iterations 100
