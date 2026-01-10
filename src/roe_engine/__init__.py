@@ -3,19 +3,227 @@ Frost Gate Spear - ROE Engine
 
 Rules of Engagement enforcement subsystem.
 Validates and enforces ROE constraints on all operations.
+Integrates with OPA for policy evaluation.
 """
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import UUID
+
+import aiohttp
 
 from ..core.config import Config
 from ..core.exceptions import ROEViolationError
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class OPAConfig:
+    """OPA server configuration."""
+    url: str = "http://localhost:8181"
+    policy_path: str = "frostgate/roe"
+    timeout: float = 5.0
+    retry_count: int = 3
+    retry_delay: float = 0.5
+
+
+class OPAClient:
+    """
+    Open Policy Agent (OPA) client for policy evaluation.
+
+    Provides:
+    - Policy evaluation via OPA REST API
+    - Caching for repeated queries
+    - Fallback to local evaluation
+    - Health checking
+    """
+
+    def __init__(self, config: OPAConfig):
+        """Initialize OPA client."""
+        self._config = config
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._healthy = False
+        self._cache: Dict[str, Dict] = {}
+        self._cache_ttl = 60  # seconds
+
+    async def start(self) -> None:
+        """Start OPA client and verify connectivity."""
+        self._session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=self._config.timeout)
+        )
+        await self._health_check()
+
+    async def stop(self) -> None:
+        """Stop OPA client."""
+        if self._session:
+            await self._session.close()
+            self._session = None
+
+    async def close(self) -> None:
+        """Close the OPA client (alias for stop)."""
+        await self.stop()
+
+    async def _health_check(self) -> bool:
+        """Check OPA server health."""
+        if not self._session:
+            return False
+
+        try:
+            async with self._session.get(f"{self._config.url}/health") as resp:
+                self._healthy = resp.status == 200
+                if self._healthy:
+                    logger.info(f"OPA server healthy at {self._config.url}")
+                return self._healthy
+        except Exception as e:
+            logger.warning(f"OPA health check failed: {e}")
+            self._healthy = False
+            return False
+
+    async def evaluate(
+        self,
+        input_data: Dict[str, Any],
+        policy_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Evaluate policy against input data.
+
+        Args:
+            input_data: Input data for policy evaluation
+            policy_path: Optional override for policy path
+
+        Returns:
+            Policy evaluation result
+        """
+        path = policy_path or self._config.policy_path
+        url = f"{self._config.url}/v1/data/{path.replace('.', '/')}"
+
+        if not self._session or not self._healthy:
+            logger.warning("OPA not available, using local evaluation fallback")
+            return await self._local_evaluate(input_data)
+
+        for attempt in range(self._config.retry_count):
+            try:
+                async with self._session.post(
+                    url,
+                    json={"input": input_data},
+                    headers={"Content-Type": "application/json"},
+                ) as resp:
+                    if resp.status == 200:
+                        result = await resp.json()
+                        return result.get("result", {})
+                    else:
+                        error_text = await resp.text()
+                        logger.warning(
+                            f"OPA evaluation failed (status {resp.status}): {error_text}"
+                        )
+
+            except asyncio.TimeoutError:
+                logger.warning(f"OPA evaluation timeout (attempt {attempt + 1})")
+            except Exception as e:
+                logger.warning(f"OPA evaluation error: {e}")
+
+            if attempt < self._config.retry_count - 1:
+                await asyncio.sleep(self._config.retry_delay)
+
+        # Fallback to local evaluation
+        return await self._local_evaluate(input_data)
+
+    async def evaluate_roe(
+        self,
+        action: Dict[str, Any],
+        roe: Dict[str, Any],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Evaluate ROE policy for an action.
+
+        Args:
+            action: Action to evaluate
+            roe: ROE configuration
+            context: Additional context
+
+        Returns:
+            Evaluation result with allow/deny and violations
+        """
+        input_data = {
+            "action": action,
+            "roe": roe,
+            "context": context or {},
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        }
+
+        result = await self.evaluate(input_data, "frostgate/roe")
+
+        return {
+            "allowed": result.get("allow", False),
+            "violations": result.get("violations", []),
+            "risk_tier": result.get("risk_tier", 1),
+        }
+
+    async def _local_evaluate(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Fallback local policy evaluation when OPA unavailable.
+
+        Implements core ROE checks without full OPA policy.
+        """
+        violations = []
+        action = input_data.get("action", {})
+        roe = input_data.get("roe", {})
+
+        # Check time window
+        if roe.get("valid_from") and roe.get("valid_to"):
+            now = datetime.utcnow()
+            try:
+                valid_from = datetime.fromisoformat(
+                    roe["valid_from"].replace("Z", "+00:00")
+                ).replace(tzinfo=None)
+                valid_to = datetime.fromisoformat(
+                    roe["valid_to"].replace("Z", "+00:00")
+                ).replace(tzinfo=None)
+                if now < valid_from or now > valid_to:
+                    violations.append("Action outside authorized time window")
+            except ValueError:
+                pass
+
+        # Check scope
+        target = action.get("target", {})
+        target_asset = target.get("asset", "")
+        disallowed = roe.get("disallowed_assets", [])
+        if target_asset in disallowed:
+            violations.append(f"Target {target_asset} is explicitly disallowed")
+
+        # Check tool permissions
+        tool = action.get("tool")
+        disallowed_tools = roe.get("disallowed_tools", [])
+        if tool in disallowed_tools:
+            violations.append(f"Tool {tool} is explicitly disallowed")
+
+        # Check lateral movement
+        if action.get("type") == "lateral_movement":
+            if not roe.get("lateral_movement_authorized"):
+                violations.append("Lateral movement not authorized")
+
+        # Check destructive operations
+        if action.get("destructive"):
+            if not roe.get("destructive_ops_authorized"):
+                violations.append("Destructive operations not authorized")
+
+        return {
+            "allow": len(violations) == 0,
+            "violations": violations,
+            "risk_tier": input_data.get("context", {}).get("risk_tier", 1),
+        }
+
+    @property
+    def is_healthy(self) -> bool:
+        """Check if OPA client is healthy."""
+        return self._healthy
 
 
 @dataclass
@@ -61,9 +269,28 @@ class ROEEngine:
             await self._opa_client.close()
 
     async def _initialize_opa(self) -> None:
-        """Initialize OPA policy agent."""
-        # In production, this would connect to OPA
-        pass
+        """Initialize OPA policy agent for ROE enforcement."""
+        # Get OPA configuration from config or use defaults
+        opa_url = getattr(self.config, "opa_url", None)
+        if opa_url is None:
+            opa_url = getattr(self.config.roe, "opa_url", "http://localhost:8181")
+
+        opa_config = OPAConfig(
+            url=opa_url,
+            policy_path="frostgate/roe",
+            timeout=5.0,
+            retry_count=3,
+        )
+
+        self._opa_client = OPAClient(opa_config)
+        await self._opa_client.start()
+
+        if self._opa_client.is_healthy:
+            logger.info("OPA client initialized and connected")
+        else:
+            logger.warning(
+                "OPA server not available - using local policy evaluation fallback"
+            )
 
     async def validate_roe(self, roe: Dict[str, Any]) -> ROEValidationResult:
         """
@@ -159,7 +386,7 @@ class ROEEngine:
         context: Optional[Dict[str, Any]] = None,
     ) -> ROEValidationResult:
         """
-        Validate a single action against ROE.
+        Validate a single action against ROE using OPA.
 
         Args:
             action: Action to validate
@@ -169,7 +396,16 @@ class ROEEngine:
         Returns:
             Validation result
         """
-        violations = await self._validate_action(action, roe, context)
+        violations = []
+
+        # Use OPA for policy evaluation if available
+        if self._opa_client:
+            opa_result = await self._opa_client.evaluate_roe(action, roe, context)
+            if not opa_result.get("allowed", False):
+                violations.extend(opa_result.get("violations", []))
+        else:
+            # Fallback to local validation
+            violations = await self._validate_action(action, roe, context)
 
         if violations:
             self._log_violation(action, violations)
