@@ -1,0 +1,260 @@
+groups:
+  - name: frostgate_security_alerts
+    rules:
+      # Red Line Violations
+      - alert: RedLineViolation
+        expr: increase(frostgate_red_line_violations_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          category: security
+        annotations:
+          summary: "Red line violation detected"
+          description: "A red line violation occurred: {{ $labels.violation_type }}"
+
+      - alert: ROEViolation
+        expr: increase(frostgate_roe_violations_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          category: security
+        annotations:
+          summary: "ROE violation detected"
+          description: "Action executed outside ROE bounds in mission {{ $labels.mission_id }}"
+
+      - alert: MLSContamination
+        expr: increase(frostgate_mls_contamination_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          category: security
+        annotations:
+          summary: "MLS cross-ring contamination detected"
+          description: "Data flow from {{ $labels.source_ring }} to {{ $labels.dest_ring }} violated"
+
+      # Mission Alerts
+      - alert: MissionBlastRadiusExceeded
+        expr: frostgate_mission_impact_score > frostgate_mission_blast_radius_cap
+        for: 0m
+        labels:
+          severity: critical
+          category: mission
+        annotations:
+          summary: "Mission blast radius exceeded"
+          description: "Mission {{ $labels.mission_id }} impact {{ $value }} exceeds cap"
+
+      - alert: MissionFailureRate
+        expr: |
+          rate(frostgate_mission_failures_total[10m]) /
+          rate(frostgate_mission_total[10m]) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+          category: mission
+        annotations:
+          summary: "High mission failure rate"
+          description: "Mission failure rate is {{ $value | humanizePercentage }}"
+
+      - alert: MissionStalled
+        expr: |
+          (time() - frostgate_mission_last_action_timestamp) > 600
+          and frostgate_mission_status == 1
+        for: 5m
+        labels:
+          severity: warning
+          category: mission
+        annotations:
+          summary: "Mission stalled"
+          description: "Mission {{ $labels.mission_id }} has no activity for 10+ minutes"
+
+  - name: frostgate_fl_alerts
+    rules:
+      # Federated Learning Alerts
+      - alert: FLPrivacyBudgetExhausted
+        expr: frostgate_fl_privacy_remaining_epsilon < 0.1
+        for: 0m
+        labels:
+          severity: critical
+          category: fl
+        annotations:
+          summary: "FL privacy budget nearly exhausted"
+          description: "Ring {{ $labels.ring }} has < 0.1 epsilon remaining"
+
+      - alert: FLDPValidationFailed
+        expr: increase(frostgate_fl_dp_validation_failures_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          category: fl
+        annotations:
+          summary: "DP-SGD validation failed"
+          description: "Differential privacy validation failed for ring {{ $labels.ring }}"
+
+      - alert: FLInsufficientParticipants
+        expr: frostgate_fl_round_participants < 3
+        for: 5m
+        labels:
+          severity: warning
+          category: fl
+        annotations:
+          summary: "Insufficient FL participants"
+          description: "FL round has only {{ $value }} participants, minimum is 3"
+
+      - alert: FLHighNoiseRatio
+        expr: frostgate_fl_noise_multiplier > 5
+        for: 5m
+        labels:
+          severity: warning
+          category: fl
+        annotations:
+          summary: "High FL noise multiplier"
+          description: "Noise multiplier {{ $value }} may impact model utility"
+
+  - name: frostgate_sandbox_alerts
+    rules:
+      # Sandbox Execution Alerts
+      - alert: SandboxExecutionTimeout
+        expr: increase(frostgate_sandbox_timeouts_total[5m]) > 3
+        for: 0m
+        labels:
+          severity: warning
+          category: sandbox
+        annotations:
+          summary: "Multiple sandbox execution timeouts"
+          description: "{{ $value }} sandbox executions timed out in 5 minutes"
+
+      - alert: SandboxExecutionFailed
+        expr: |
+          rate(frostgate_sandbox_failures_total[10m]) /
+          rate(frostgate_sandbox_executions_total[10m]) > 0.3
+        for: 5m
+        labels:
+          severity: warning
+          category: sandbox
+        annotations:
+          summary: "High sandbox failure rate"
+          description: "Sandbox failure rate is {{ $value | humanizePercentage }}"
+
+      - alert: SandboxResourceExhausted
+        expr: frostgate_sandbox_active_containers > 50
+        for: 5m
+        labels:
+          severity: warning
+          category: sandbox
+        annotations:
+          summary: "Too many active sandbox containers"
+          description: "{{ $value }} active containers exceeds threshold"
+
+  - name: frostgate_governance_alerts
+    rules:
+      # Governance Gate Alerts
+      - alert: GateFailure
+        expr: increase(frostgate_gate_failures_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+          category: governance
+        annotations:
+          summary: "Governance gate failure"
+          description: "Gate {{ $labels.gate_name }} failed for mission {{ $labels.mission_id }}"
+
+      - alert: ApprovalPending
+        expr: |
+          (time() - frostgate_approval_request_timestamp) > 86400
+          and frostgate_approval_status == 0
+        for: 1h
+        labels:
+          severity: warning
+          category: governance
+        annotations:
+          summary: "Approval pending for 24+ hours"
+          description: "Mission {{ $labels.mission_id }} awaiting approval"
+
+      - alert: BudgetThresholdExceeded
+        expr: frostgate_budget_usage_ratio > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          category: governance
+        annotations:
+          summary: "Budget threshold exceeded"
+          description: "Budget usage at {{ $value | humanizePercentage }}"
+
+  - name: frostgate_audit_alerts
+    rules:
+      # Audit System Alerts
+      - alert: AuditChainBroken
+        expr: increase(frostgate_audit_chain_breaks_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          category: audit
+        annotations:
+          summary: "Audit chain integrity broken"
+          description: "HMAC chain validation failed - potential tampering"
+
+      - alert: AuditLogBackpressure
+        expr: frostgate_audit_queue_size > 10000
+        for: 5m
+        labels:
+          severity: warning
+          category: audit
+        annotations:
+          summary: "Audit log backpressure"
+          description: "Audit queue size {{ $value }} exceeds threshold"
+
+      - alert: ForensicCompletenessLow
+        expr: frostgate_forensic_completeness < 0.95
+        for: 5m
+        labels:
+          severity: warning
+          category: audit
+        annotations:
+          summary: "Low forensic completeness"
+          description: "Forensic completeness {{ $value | humanizePercentage }} below 95% threshold"
+
+  - name: frostgate_system_alerts
+    rules:
+      # System Health Alerts
+      - alert: FrostGateDown
+        expr: up{job="frostgate"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          category: system
+        annotations:
+          summary: "Frost Gate Spear is down"
+          description: "The main application has been down for 1+ minute"
+
+      - alert: OPADown
+        expr: up{job="opa"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          category: system
+        annotations:
+          summary: "OPA policy engine is down"
+          description: "Policy evaluation unavailable - defaulting to deny"
+
+      - alert: HighLatency
+        expr: |
+          histogram_quantile(0.95, rate(frostgate_request_duration_seconds_bucket[5m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+          category: system
+        annotations:
+          summary: "High request latency"
+          description: "95th percentile latency is {{ $value | humanizeDuration }}"
+
+      - alert: HighMemoryUsage
+        expr: |
+          process_resident_memory_bytes{job="frostgate"} /
+          node_memory_MemTotal_bytes > 0.8
+        for: 10m
+        labels:
+          severity: warning
+          category: system
+        annotations:
+          summary: "High memory usage"
+          description: "Memory usage is {{ $value | humanizePercentage }}"

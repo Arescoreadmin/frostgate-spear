@@ -1,0 +1,116 @@
+{
+  "scenario_id": "scen-unclass-perimeter-001",
+  "version": "1.0.0",
+  "name": "External Perimeter Reconnaissance",
+  "description": "Comprehensive external perimeter scanning and vulnerability assessment",
+  "classification_level": "UNCLASS",
+  "author": "security-team",
+  "created_at": "2025-01-14T10:00:00Z",
+  "targets": [
+    {
+      "name": "ext-web-01.example.com",
+      "type": "web_server",
+      "network": "203.0.113.0/24",
+      "ip": "203.0.113.10",
+      "criticality": "medium",
+      "services": ["http", "https"]
+    },
+    {
+      "name": "ext-web-02.example.com",
+      "type": "web_server",
+      "network": "203.0.113.0/24",
+      "ip": "203.0.113.11",
+      "criticality": "medium",
+      "services": ["http", "https"]
+    },
+    {
+      "name": "ext-api-01.example.com",
+      "type": "api_server",
+      "network": "203.0.113.0/24",
+      "ip": "203.0.113.20",
+      "criticality": "high",
+      "services": ["https"]
+    },
+    {
+      "name": "ext-mail-01.example.com",
+      "type": "mail_server",
+      "network": "203.0.113.0/24",
+      "ip": "203.0.113.30",
+      "criticality": "high",
+      "services": ["smtp", "imap", "https"]
+    }
+  ],
+  "kill_chain": [
+    "reconnaissance"
+  ],
+  "phases": [
+    {
+      "phase_id": "phase-recon-001",
+      "name": "Network Discovery",
+      "type": "reconnaissance",
+      "objective": "Identify live hosts and open ports on external perimeter",
+      "actions": [
+        {
+          "action_id": "action-001",
+          "type": "reconnaissance",
+          "technique_id": "T1595",
+          "tool": "nmap",
+          "parameters": {
+            "scan_type": "syn",
+            "ports": "1-65535",
+            "timing": "T3"
+          },
+          "target_scope": "all"
+        },
+        {
+          "action_id": "action-002",
+          "type": "reconnaissance",
+          "technique_id": "T1592",
+          "tool": "amass",
+          "parameters": {
+            "mode": "passive",
+            "domain": "example.com"
+          }
+        }
+      ]
+    },
+    {
+      "phase_id": "phase-vuln-001",
+      "name": "Vulnerability Scanning",
+      "type": "vulnerability_scan",
+      "objective": "Identify vulnerabilities in discovered services",
+      "depends_on": ["phase-recon-001"],
+      "actions": [
+        {
+          "action_id": "action-003",
+          "type": "vulnerability_scan",
+          "tool": "nuclei",
+          "parameters": {
+            "templates": "cves,exposed-panels,takeovers",
+            "severity": "medium,high,critical"
+          },
+          "target_scope": "web_servers"
+        },
+        {
+          "action_id": "action-004",
+          "type": "vulnerability_scan",
+          "tool": "nikto",
+          "parameters": {
+            "tuning": "1234"
+          },
+          "target_scope": "web_servers"
+        }
+      ]
+    }
+  ],
+  "success_criteria": {
+    "reconnaissance_complete": true,
+    "vulnerabilities_documented": true,
+    "report_generated": true
+  },
+  "metadata": {
+    "estimated_duration_hours": 4,
+    "stealth_level": "loud",
+    "tags": ["external", "reconnaissance", "vuln-scan"]
+  }
+}

@@ -2,19 +2,23 @@
 Frost Gate Spear - Attack Planner
 
 Generates execution plans based on scenarios, personas, and constraints.
+Integrates with PersonasManager for persona-aware technique selection.
 """
 
 import asyncio
 import hashlib
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from ..core.config import Config
 from ..core.mission import ExecutionPlan
+
+if TYPE_CHECKING:
+    from ..personas import PersonasManager, AdversaryPersona, PlannerBiases
 
 logger = logging.getLogger(__name__)
 
@@ -37,27 +41,47 @@ class Planner:
 
     Generates execution plans including:
     - Kill chain phase mapping
-    - Technique selection based on persona
+    - Technique selection based on persona (via PersonasManager)
     - Multi-branch DAG planning
     - Counterfactual analysis
     - Constraint-aware optimization
     """
 
-    def __init__(self, config: Config):
-        """Initialize Planner."""
+    def __init__(self, config: Config, personas_manager: Optional["PersonasManager"] = None):
+        """
+        Initialize Planner.
+
+        Args:
+            config: Application configuration
+            personas_manager: Optional PersonasManager for persona integration
+        """
         self.config = config
+        self._personas_manager = personas_manager
         self._personas: Dict[str, Dict] = {}
         self._technique_db: Dict[str, Dict] = {}
+        self._technique_to_tool: Dict[str, List[str]] = {}
+
+    def set_personas_manager(self, personas_manager: "PersonasManager") -> None:
+        """
+        Set the PersonasManager for persona-aware planning.
+
+        Args:
+            personas_manager: PersonasManager instance
+        """
+        self._personas_manager = personas_manager
+        logger.info("PersonasManager connected to Planner")
 
     async def start(self) -> None:
         """Start Planner."""
         logger.info("Starting Planner...")
         await self._load_technique_database()
+        await self._load_technique_tool_mapping()
         logger.info("Planner started")
 
     async def stop(self) -> None:
         """Stop Planner."""
         logger.info("Stopping Planner...")
+        self._personas_manager = None
 
     async def _load_technique_database(self) -> None:
         """Load MITRE ATT&CK technique database."""
@@ -75,6 +99,52 @@ class Planner:
             "collection": ["T1114", "T1213"],
             "exfiltration": ["T1041", "T1567"],
             "impact": ["T1486", "T1490"],
+        }
+
+    async def _load_technique_tool_mapping(self) -> None:
+        """Load mapping of techniques to tools."""
+        self._technique_to_tool = {
+            # Reconnaissance
+            "T1595": ["nmap", "masscan", "shodan"],
+            "T1592": ["amass", "subfinder", "dnsrecon"],
+            "T1589": ["theharvester", "linkedin_scraper"],
+            # Initial Access
+            "T1566": ["gophish", "phishing_toolkit"],
+            "T1190": ["sqlmap", "nuclei", "metasploit"],
+            "T1133": ["vpn_scanner", "rdp_scanner"],
+            # Execution
+            "T1059": ["powershell", "bash", "python"],
+            "T1204": ["macro_builder", "lnk_generator"],
+            # Persistence
+            "T1098": ["bloodhound", "ad_tools"],
+            "T1136": ["net_user", "ldap_tools"],
+            "T1053": ["schtasks", "cron_manager"],
+            # Privilege Escalation
+            "T1068": ["metasploit", "cobalt_strike"],
+            "T1548": ["uac_bypass", "sudo_exploit"],
+            # Defense Evasion
+            "T1027": ["obfuscator", "packer"],
+            "T1070": ["log_cleaner", "timestomp"],
+            "T1036": ["masquerade_tool"],
+            # Credential Access
+            "T1003": ["mimikatz", "secretsdump"],
+            "T1558": ["rubeus", "kerberoast"],
+            # Discovery
+            "T1087": ["net_user", "ldapsearch"],
+            "T1482": ["bloodhound", "pingcastle"],
+            "T1069": ["net_group", "ldapsearch"],
+            # Lateral Movement
+            "T1021": ["psexec", "ssh_client", "rdp_client"],
+            "T1550": ["pth_toolkit", "overpass_the_hash"],
+            # Collection
+            "T1114": ["mailsniper", "ruler"],
+            "T1213": ["sharefinder", "snaffler"],
+            # Exfiltration
+            "T1041": ["exfil_dns", "exfil_http"],
+            "T1567": ["cloud_uploader"],
+            # Impact
+            "T1486": ["ransomware_sim"],
+            "T1490": ["shadow_delete"],
         }
 
     async def create_plan(self, mission: Any) -> ExecutionPlan:
@@ -384,16 +454,67 @@ class Planner:
         }
 
     async def _get_persona(self, persona_id: Optional[str]) -> Optional[Dict[str, Any]]:
-        """Load persona configuration."""
+        """
+        Load persona configuration via PersonasManager.
+
+        Args:
+            persona_id: Persona identifier
+
+        Returns:
+            Persona data dictionary or None
+        """
         if not persona_id:
             return None
 
-        # Check cache
+        # Check local cache first
         if persona_id in self._personas:
             return self._personas[persona_id]
 
-        # In production, load from persona store
+        # Use PersonasManager if available
+        if self._personas_manager:
+            try:
+                persona = self._personas_manager.get_persona(persona_id)
+                if persona:
+                    # Convert to dict and cache
+                    persona_dict = persona.to_dict()
+                    self._personas[persona_id] = persona_dict
+                    logger.debug(f"Loaded persona {persona.name} from PersonasManager")
+                    return persona_dict
+            except Exception as e:
+                logger.warning(f"Failed to load persona {persona_id}: {e}")
+
         return None
+
+    async def get_persona_biases(self, persona_id: str) -> Optional["PlannerBiases"]:
+        """
+        Get planner biases for persona from PersonasManager.
+
+        Args:
+            persona_id: Persona identifier
+
+        Returns:
+            PlannerBiases or None
+        """
+        if not self._personas_manager:
+            return None
+
+        return self._personas_manager.get_planner_biases(persona_id)
+
+    async def get_persona_techniques(self, persona_id: str) -> List[Dict[str, Any]]:
+        """
+        Get technique preferences for persona from PersonasManager.
+
+        Args:
+            persona_id: Persona identifier
+
+        Returns:
+            List of technique preferences
+        """
+        if not self._personas_manager:
+            return []
+
+        prefs = self._personas_manager.get_technique_preferences(persona_id)
+        return [p.to_dict() if hasattr(p, 'to_dict') else p for p in prefs]
 
     async def generate_counterfactuals(
         self, plan: ExecutionPlan, mission: Any

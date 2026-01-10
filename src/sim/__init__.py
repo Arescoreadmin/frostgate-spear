@@ -1,7 +1,8 @@
 """
 Frost Gate Spear - Simulation and Execution Engine
 
-Executes attack plans in simulation or live environments.
+Executes attack plans in simulation or live environments with
+sandboxed tool execution via Docker isolation.
 """
 
 import asyncio
@@ -13,6 +14,15 @@ from uuid import UUID, uuid4
 
 from ..core.config import Config
 from ..core.mission import ActionResult, Mission
+from ..sandbox import (
+    ToolExecutor,
+    ToolExecutionRequest,
+    ToolExecutionResult,
+    SandboxConfig,
+    IsolationLevel,
+    SandboxState,
+)
+from ..security import SecurityManager, PolicyDecision
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +51,7 @@ class Executor:
     - Production/Mission mode (live execution)
     - Multi-branch DAG execution
     - Concurrent action limits
+    - Sandboxed tool execution via Docker
     """
 
     def __init__(self, config: Config):
@@ -48,18 +59,38 @@ class Executor:
         self.config = config
         self._active_executions: Dict[UUID, bool] = {}
         self._abort_flags: Dict[UUID, bool] = {}
+        self._tool_executor: Optional[ToolExecutor] = None
+        self._security_manager: Optional[SecurityManager] = None
 
     async def start(self) -> None:
-        """Start Executor."""
+        """Start Executor with sandboxed tool execution."""
         logger.info("Starting Executor...")
-        logger.info("Executor started")
+
+        # Initialize tool executor for sandboxed execution
+        self._tool_executor = ToolExecutor(self.config)
+        await self._tool_executor.start()
+
+        # Initialize security manager for policy checks
+        self._security_manager = SecurityManager(self.config)
+        await self._security_manager.start()
+
+        logger.info("Executor started with sandbox and security integration")
 
     async def stop(self) -> None:
         """Stop Executor."""
         logger.info("Stopping Executor...")
+
         # Abort all active executions
         for mission_id in list(self._active_executions.keys()):
             self._abort_flags[mission_id] = True
+
+        # Stop tool executor
+        if self._tool_executor:
+            await self._tool_executor.stop()
+
+        # Stop security manager
+        if self._security_manager:
+            await self._security_manager.stop()
 
     async def execute(self, mission: Mission) -> AsyncGenerator[ActionResult, None]:
         """
@@ -254,16 +285,103 @@ class Executor:
     async def _execute_live_action(
         self, action: Dict[str, Any], context: ExecutionContext
     ) -> Dict[str, Any]:
-        """Execute action in live environment."""
-        # In production, this would execute real attack actions
-        # For now, return simulated results
-        await asyncio.sleep(0.3)
+        """Execute action in live environment using sandboxed tools."""
+        if not self._tool_executor:
+            logger.warning("Tool executor not initialized, falling back to simulation")
+            return await self._simulate_action(action, context)
 
-        return {
-            "mode": "live",
-            "action_type": action.get("type"),
-            "artifacts": [],
+        tool_id = action.get("tool", "generic_tool")
+        action_type = action.get("type", "unknown")
+        target = action.get("target", {})
+
+        # Build tool execution request
+        request = ToolExecutionRequest(
+            request_id=uuid4(),
+            tool_id=tool_id,
+            tool_image=self._get_tool_image(tool_id),
+            command=self._build_tool_command(tool_id, action, target),
+            arguments=action.get("parameters", {}),
+            environment={
+                "TARGET_HOST": target.get("asset", ""),
+                "TARGET_NETWORK": target.get("network", ""),
+                "ACTION_TYPE": action_type,
+            },
+            classification_level=context.classification_level,
+            mission_id=context.mission_id,
+        )
+
+        # Authorize action via security manager
+        if self._security_manager:
+            authorized, reasons = await self._security_manager.authorize_action(
+                action=action,
+                roe={"allowed_tools": [tool_id], "allowed_networks": [target.get("network", "")]},
+            )
+
+            if not authorized:
+                logger.warning(f"Action not authorized: {reasons}")
+                return {
+                    "mode": "live",
+                    "action_type": action_type,
+                    "status": "denied",
+                    "reasons": reasons,
+                    "artifacts": [],
+                }
+
+        # Execute in sandbox
+        try:
+            result = await self._tool_executor.execute(request)
+
+            return {
+                "mode": "live",
+                "action_type": action_type,
+                "tool_id": tool_id,
+                "sandbox_state": result.state.value,
+                "exit_code": result.exit_code,
+                "stdout": result.stdout[:1000] if result.stdout else "",
+                "stderr": result.stderr[:500] if result.stderr else "",
+                "duration_ms": result.duration_ms,
+                "execution_hash": result.execution_hash,
+                "artifacts": [
+                    {"name": k, "size": len(v)}
+                    for k, v in result.output_files.items()
+                ],
+            }
+
+        except Exception as e:
+            logger.error(f"Sandbox execution failed: {e}")
+            return {
+                "mode": "live",
+                "action_type": action_type,
+                "status": "failed",
+                "error": str(e),
+                "artifacts": [],
+            }
+
+    def _get_tool_image(self, tool_id: str) -> str:
+        """Get Docker image for tool."""
+        from ..sandbox import ToolImageRegistry
+
+        config = ToolImageRegistry.get_image_config(tool_id)
+        if config:
+            return config["image"]
+        return f"frostgate/tools-{tool_id}:latest"
+
+    def _build_tool_command(
+        self,
+        tool_id: str,
+        action: Dict[str, Any],
+        target: Dict[str, Any],
+    ) -> List[str]:
+        """Build command for tool execution."""
+        commands = {
+            "nmap": ["nmap", "-sV", "-sC", "-oA", "/workspace/output/scan", target.get("asset", "")],
+            "masscan": ["masscan", target.get("network", ""), "-p1-65535", "--rate=1000"],
+            "nikto": ["nikto", "-h", target.get("asset", ""), "-output", "/workspace/output/nikto.html"],
+            "nuclei": ["nuclei", "-u", target.get("asset", ""), "-o", "/workspace/output/nuclei.txt"],
+            "sqlmap": ["sqlmap", "-u", target.get("asset", ""), "--batch", "--forms"],
         }
+
+        return commands.get(tool_id, [tool_id, "--help"])
 
     def _calculate_action_impact(
         self, action: Dict[str, Any], output: Optional[Dict[str, Any]]
