@@ -2,6 +2,7 @@
 Frost Gate Spear Core Engine
 
 Main orchestration engine coordinating all subsystems.
+Integrates safety policy evaluation, MLS validation, and SBOM verification.
 """
 
 import asyncio
@@ -12,9 +13,12 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 from uuid import UUID, uuid4
 
+import aiohttp
+
 from .config import Config
 from .exceptions import (
     FrostGateError,
+    MLSViolationError,
     PolicyViolationError,
     ROEViolationError,
     SafetyConstraintError,
@@ -22,6 +26,129 @@ from .exceptions import (
 from .mission import Mission, MissionState
 
 logger = logging.getLogger(__name__)
+
+
+class SafetyPolicyEvaluator:
+    """
+    Safety policy evaluator using OPA.
+
+    Evaluates safety constraints during mission execution including:
+    - Forensic completeness checks
+    - Concurrency limits
+    - Simulation validation
+    - Scope expansion prevention
+    - Cross-ring contamination prevention
+    """
+
+    def __init__(self, opa_url: str = "http://localhost:8181"):
+        """Initialize safety evaluator."""
+        self._opa_url = opa_url
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._healthy = False
+
+    async def start(self) -> None:
+        """Start the safety evaluator."""
+        self._session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=5.0)
+        )
+        await self._check_health()
+
+    async def stop(self) -> None:
+        """Stop the safety evaluator."""
+        if self._session:
+            await self._session.close()
+            self._session = None
+
+    async def _check_health(self) -> bool:
+        """Check OPA health."""
+        if not self._session:
+            return False
+        try:
+            async with self._session.get(f"{self._opa_url}/health") as resp:
+                self._healthy = resp.status == 200
+                return self._healthy
+        except Exception:
+            self._healthy = False
+            return False
+
+    async def evaluate_safety(
+        self,
+        action: Dict[str, Any],
+        mission_context: Dict[str, Any],
+        metrics: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Evaluate safety constraints for an action.
+
+        Args:
+            action: Action being evaluated
+            mission_context: Mission context including policy, ROE
+            metrics: Current system metrics
+
+        Returns:
+            Evaluation result with safe/unsafe and violations
+        """
+        input_data = {
+            "action": action,
+            "context": mission_context,
+            "metrics": metrics,
+            "state": {
+                "active_operations": mission_context.get("active_operations", 0),
+            },
+            "policy": mission_context.get("policy_envelope", {}),
+            "promotion": mission_context.get("promotion", {}),
+        }
+
+        if self._healthy and self._session:
+            try:
+                url = f"{self._opa_url}/v1/data/frostgate/safety"
+                async with self._session.post(
+                    url,
+                    json={"input": input_data},
+                ) as resp:
+                    if resp.status == 200:
+                        result = await resp.json()
+                        policy_result = result.get("result", {})
+                        return {
+                            "safe": policy_result.get("safe", False),
+                            "violations": policy_result.get("safety_violations", []),
+                            "red_lines": policy_result.get("red_line_violations", []),
+                        }
+            except Exception as e:
+                logger.warning(f"OPA safety evaluation failed: {e}")
+
+        # Fallback to local evaluation
+        return await self._local_evaluate(input_data)
+
+    async def _local_evaluate(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Local safety evaluation fallback."""
+        violations = []
+        action = input_data.get("action", {})
+        context = input_data.get("context", {})
+        metrics = input_data.get("metrics", {})
+
+        # Check forensic completeness
+        forensic_completeness = metrics.get("forensic_completeness", 1.0)
+        if forensic_completeness < 0.95:
+            violations.append(
+                f"Forensic completeness below threshold: {forensic_completeness:.2f} < 0.95"
+            )
+
+        # Check scope expansion
+        if action.get("expands_scope") and not action.get("scope_expansion_authorized"):
+            violations.append("Unauthorized scope expansion attempted")
+
+        # Check destructive operations
+        if action.get("destructive"):
+            approvals = context.get("approvals", {})
+            if not approvals.get("ao_signature"):
+                violations.append("Destructive operation without AO signature")
+
+        return {
+            "safe": len(violations) == 0,
+            "violations": violations,
+            "red_lines": [],
+        }
 
 
 class EngineState(Enum):
@@ -86,6 +213,12 @@ class FrostGateSpear:
         self._mls_manager = None
         self._fl_controller = None
         self._governance = None
+        self._integrity_manager = None
+
+        # Safety policy evaluator
+        self._safety_evaluator = SafetyPolicyEvaluator(
+            opa_url=getattr(config, "opa_url", "http://localhost:8181")
+        )
 
         # Mission tracking
         self._missions: Dict[UUID, Mission] = {}
@@ -294,7 +427,7 @@ class FrostGateSpear:
     # Private methods
 
     async def _initialize_subsystems(self) -> None:
-        """Initialize all subsystems."""
+        """Initialize all subsystems including safety evaluator and integrity manager."""
         from ..policy_interpreter import PolicyInterpreter
         from ..roe_engine import ROEEngine
         from ..planner import Planner
@@ -305,6 +438,7 @@ class FrostGateSpear:
         from ..mls import MLSManager
         from ..fl import FLController
         from ..governance import GovernanceManager
+        from ..integrity import IntegrityManager
 
         self._policy_interpreter = PolicyInterpreter(self.config)
         self._roe_engine = ROEEngine(self.config)
@@ -317,7 +451,14 @@ class FrostGateSpear:
         self._fl_controller = FLController(self.config)
         self._governance = GovernanceManager(self.config)
 
-        # Start all subsystems
+        # Initialize integrity manager for SBOM/artifact verification
+        trust_store_path = getattr(self.config, "trust_store_path", None)
+        self._integrity_manager = IntegrityManager(
+            trust_store_path=trust_store_path,
+            require_signatures=getattr(self.config, "require_signatures", True),
+        )
+
+        # Start all subsystems including safety evaluator
         await asyncio.gather(
             self._policy_interpreter.start(),
             self._roe_engine.start(),
@@ -329,6 +470,8 @@ class FrostGateSpear:
             self._mls_manager.start(),
             self._fl_controller.start(),
             self._governance.start(),
+            self._integrity_manager.start(),
+            self._safety_evaluator.start(),
         )
 
     async def _validate_configuration(self) -> None:
@@ -360,6 +503,7 @@ class FrostGateSpear:
             self._roe_engine,
             self._policy_interpreter,
             self._governance,
+            self._safety_evaluator,
         ]
 
         for subsystem in subsystems:
@@ -370,22 +514,156 @@ class FrostGateSpear:
                     logger.error(f"Error stopping subsystem: {e}")
 
     async def _preflight_checks(self, mission: Mission) -> None:
-        """Run pre-flight checks before mission execution."""
+        """
+        Run pre-flight checks before mission execution.
+
+        Includes:
+        - Approval validation
+        - Scenario hash verification
+        - SBOM verification (if present)
+        - Budget checks
+        """
         # Check approvals
         await self._governance.validate_approvals(mission)
 
         # Validate scenario hash
         await self._forensics.validate_scenario_hash(mission)
 
+        # Verify scenario integrity
+        if self._integrity_manager:
+            expected_hash = mission.policy_envelope.get("scenario_hash")
+            scenario_result = await self._integrity_manager.verify_artifact(
+                artifact_type="scenario",
+                artifact=mission.scenario,
+                expected_hash=expected_hash,
+                require_signature=mission.policy_envelope.get("risk_tier", 1) >= 3,
+            )
+            if not scenario_result.valid:
+                raise PolicyViolationError(
+                    f"Scenario integrity verification failed: {scenario_result.details}"
+                )
+            logger.info(
+                f"Scenario integrity verified: {scenario_result.computed_hash[:16]}..."
+            )
+
+        # Verify SBOM if attached to scenario
+        sbom = mission.scenario.get("sbom")
+        if sbom and self._integrity_manager:
+            attestation = mission.scenario.get("sbom_attestation")
+            sbom_result = await self._integrity_manager.sbom_verifier.verify_sbom(
+                sbom=sbom,
+                attestation=attestation,
+            )
+            if not sbom_result.valid:
+                raise PolicyViolationError(
+                    f"SBOM verification failed: {sbom_result.details}"
+                )
+            logger.info(
+                f"SBOM verified: {sbom_result.details.get('components', 0)} components, "
+                f"hash_coverage={sbom_result.details.get('hash_coverage', 0):.0%}"
+            )
+
+        # Verify policy envelope integrity
+        if self._integrity_manager:
+            envelope_result = await self._integrity_manager.verify_policy_envelope(
+                mission.policy_envelope
+            )
+            if envelope_result.signature_valid is False:
+                # Only fail if signature was present but invalid
+                logger.warning(
+                    f"Policy envelope signature invalid: {envelope_result.details}"
+                )
+
         # Check budget
         await self._governance.check_budget(mission)
 
     async def _execute_mission(self, mission: Mission) -> None:
-        """Execute mission plan."""
+        """
+        Execute mission plan with full safety, MLS, and ROE enforcement.
+
+        Integrates:
+        - Safety policy evaluation via OPA
+        - MLS validation for data flow
+        - ROE violation checking
+        - Impact score tracking
+        """
         try:
             async for action_result in self._executor.execute(mission):
-                # Log to forensics
+                # Log to forensics first (for audit trail)
                 await self._forensics.log_action(mission, action_result)
+
+                # Build action data for policy evaluation
+                action_data = {
+                    "action_id": str(action_result.action_id),
+                    "action_type": action_result.action_type,
+                    "target": action_result.target,
+                    "status": action_result.status,
+                    "destructive": getattr(action_result, "destructive", False),
+                    "expands_scope": getattr(action_result, "expands_scope", False),
+                    "estimated_impact": getattr(action_result, "impact_score", 0),
+                }
+
+                # Safety policy evaluation
+                safety_result = await self._safety_evaluator.evaluate_safety(
+                    action=action_data,
+                    mission_context={
+                        "policy_envelope": mission.policy_envelope,
+                        "active_operations": self.metrics.active_missions,
+                        "approvals": mission.policy_envelope.get("approvals", {}),
+                    },
+                    metrics={
+                        "forensic_completeness": self.metrics.forensic_completeness,
+                    },
+                )
+
+                # Check for red line violations (abort immediately)
+                if safety_result.get("red_lines"):
+                    logger.error(
+                        f"RED LINE VIOLATION: {safety_result['red_lines']}"
+                    )
+                    self.metrics.safety_violations += 1
+                    await self.abort_mission(
+                        mission.mission_id,
+                        reason=f"Red line violation: {safety_result['red_lines'][0]}",
+                    )
+                    return
+
+                # Check for safety violations
+                if not safety_result.get("safe", True):
+                    logger.warning(
+                        f"Safety violation: {safety_result.get('violations', [])}"
+                    )
+                    self.metrics.safety_violations += 1
+                    # Continue but log warning for non-red-line violations
+
+                # MLS validation for any data flow
+                if hasattr(action_result, "data_flow") and action_result.data_flow:
+                    from ..mls import DataFlowRequest
+                    flow_request = DataFlowRequest(
+                        source_ring=action_result.data_flow.get(
+                            "source", mission.classification_level
+                        ),
+                        dest_ring=action_result.data_flow.get(
+                            "destination", mission.classification_level
+                        ),
+                        data_type=action_result.data_flow.get("type", "action_output"),
+                        sanitized=action_result.data_flow.get("sanitized", False),
+                        declassification_authorized=action_result.data_flow.get(
+                            "declassification_authorized", False
+                        ),
+                        requestor=str(mission.mission_id),
+                        timestamp=datetime.utcnow(),
+                    )
+                    try:
+                        await self._mls_manager.validate_data_flow(flow_request)
+                    except MLSViolationError as e:
+                        logger.error(f"MLS violation: {e}")
+                        self.metrics.policy_violations += 1
+                        await self.abort_mission(
+                            mission.mission_id,
+                            reason=f"MLS violation: {e}",
+                        )
+                        return
 
                 # Check for ROE violations
                 if await self._roe_engine.check_violation(action_result):

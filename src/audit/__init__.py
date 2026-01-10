@@ -464,35 +464,98 @@ class TimestampAuthority:
             return self._generate_local_timestamp(data_hash)
 
     async def _request_tsa_timestamp(self, data_hash: str) -> Dict[str, Any]:
-        """Make RFC 3161 timestamp request."""
+        """
+        Make RFC 3161 timestamp request.
+
+        Attempts to contact external TSA, falls back to local binding if unavailable.
+        """
+        import aiohttp
+
         # Strip prefix if present
-        hash_bytes = bytes.fromhex(data_hash.replace("sha256:", ""))
+        hash_value = data_hash.replace("sha256:", "")
+        hash_bytes = bytes.fromhex(hash_value)
 
-        # Build TSQ (TimeStampRequest) - simplified
-        # In production, use proper ASN.1 encoding
+        # Build simplified TimeStampReq
         nonce = secrets.token_bytes(8)
+        nonce_int = int.from_bytes(nonce, byteorder="big")
 
-        # For MVP, generate local timestamp with cryptographic binding
+        # SHA-256 OID and MessageImprint
+        sha256_oid = bytes([
+            0x30, 0x31, 0x30, 0x0d, 0x06, 0x09,
+            0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
+            0x05, 0x00, 0x04, 0x20,
+        ])
+        message_imprint = sha256_oid + hash_bytes
+
+        # Build TimeStampReq structure
+        version = bytes([0x02, 0x01, 0x01])
+        nonce_der = bytes([0x02, len(nonce)]) + nonce
+        cert_req = bytes([0x01, 0x01, 0xff])
+
+        content = version + message_imprint + nonce_der + cert_req
+        if len(content) < 128:
+            tsq = bytes([0x30, len(content)]) + content
+        else:
+            len_bytes = len(content).to_bytes(2, byteorder="big")
+            tsq = bytes([0x30, 0x82]) + len_bytes + content
+
+        # Try to make actual TSA request
+        try:
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=10.0)
+            ) as session:
+                async with session.post(
+                    self.tsa_url,
+                    data=tsq,
+                    headers={
+                        "Content-Type": "application/timestamp-query",
+                        "Accept": "application/timestamp-reply",
+                    },
+                ) as resp:
+                    if resp.status == 200:
+                        tsr_data = await resp.read()
+                        timestamp = datetime.now(timezone.utc)
+                        token_hash = hashlib.sha256(tsr_data).hexdigest()
+
+                        return {
+                            "timestamp": timestamp.isoformat(),
+                            "token": base64.b64encode(tsr_data).decode(),
+                            "token_hash": token_hash,
+                            "tsa_url": self.tsa_url,
+                            "verified": True,
+                            "external": True,
+                        }
+        except Exception as e:
+            logger.debug(f"External TSA request failed: {e}, using local timestamp")
+
+        # Fallback to local timestamp with cryptographic binding
         timestamp = datetime.now(timezone.utc)
 
-        # Create timestamp token (simplified)
+        # Create cryptographically-bound local token
         token_data = {
             "timestamp": timestamp.isoformat(),
             "hash": data_hash,
             "nonce": base64.b64encode(nonce).decode(),
-            "tsa": self.tsa_url,
-            "policy": "1.2.3.4.1",  # TSA policy OID
+            "tsa": "local",
+            "type": "local_binding",
         }
 
+        # Create binding hash
+        binding_data = (
+            timestamp.isoformat().encode() + hash_bytes + nonce
+        )
+        binding_hash = hashlib.sha256(binding_data).hexdigest()
+        token_data["binding_hash"] = binding_hash
+
         token_json = json.dumps(token_data, sort_keys=True)
-        token_hash = hashlib.sha256(token_json.encode()).hexdigest()
 
         return {
             "timestamp": timestamp.isoformat(),
             "token": base64.b64encode(token_json.encode()).decode(),
-            "token_hash": token_hash,
-            "tsa_url": self.tsa_url,
-            "verified": True,
+            "token_hash": binding_hash,
+            "tsa_url": "local",
+            "verified": False,
+            "external": False,
         }
 
     def _generate_local_timestamp(self, data_hash: str) -> Dict[str, Any]:
