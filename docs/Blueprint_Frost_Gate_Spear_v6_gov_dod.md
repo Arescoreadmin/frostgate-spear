@@ -1,5 +1,9 @@
 # Frost Gate Spear Blueprint v6 - DoD/Government Class
 
+> **SUPERSEDED**: This document has been superseded by Blueprint v6.1 Showstopper Edition.
+> See [Blueprint_Frost_Gate_Spear_v6.1_Showstopper.md](Blueprint_Frost_Gate_Spear_v6.1_Showstopper.md) for current requirements.
+> v6 remains available for historical reference only.
+
 ## Executive Summary
 
 Frost Gate Spear is an autonomous red team simulation and adversary emulation platform designed for defense and government environments. This blueprint defines the technical architecture, safety controls, and operational constraints required for deployment across classification levels from UNCLASS through TOP SECRET.
