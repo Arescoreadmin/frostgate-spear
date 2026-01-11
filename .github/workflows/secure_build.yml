@@ -1244,6 +1244,95 @@ jobs:
           print("Bypass logging capability verified")
           PYEOF
 
+      - name: Run bypass prevention tests
+        run: |
+          echo "Running bypass prevention test suite..."
+          python -m pytest tests/test_engine_guardrails.py -v -k "bypass or NoBypass or GuardOrder or Concurrency or Token" --tb=short
+
+      - name: Static scan - Sealed funnel verification
+        run: |
+          echo "==================================================================="
+          echo "SEALED FUNNEL VERIFICATION"
+          echo "Checking for direct executor invocations outside engine.py"
+          echo "==================================================================="
+
+          # This is the "dumb but brutally effective" scan
+          # Fail the build if any of these patterns exist outside engine.py
+
+          VIOLATIONS=""
+
+          # Check for _execute_action calls outside engine.py
+          echo "Checking for _execute_action invocations..."
+          if rg -n "_execute_action\(" src/ | rg -v "src/core/engine.py" | rg -v "src/sim/__init__.py" | rg -v "__pycache__"; then
+            echo "::error::VIOLATION: _execute_action called outside authorized paths"
+            VIOLATIONS="${VIOLATIONS}_execute_action "
+          fi
+
+          # Check for _execute_live_action calls outside engine.py
+          echo "Checking for _execute_live_action invocations..."
+          if rg -n "_execute_live_action\(" src/ | rg -v "src/core/engine.py" | rg -v "src/sim/__init__.py" | rg -v "__pycache__"; then
+            echo "::error::VIOLATION: _execute_live_action called outside authorized paths"
+            VIOLATIONS="${VIOLATIONS}_execute_live_action "
+          fi
+
+          # Check for direct executor.execute calls outside engine paths
+          echo "Checking for direct executor.execute invocations..."
+          if rg -n "executor\.execute\(" src/ | rg -v "src/core/engine.py" | rg -v "src/sim/__init__.py" | rg -v "src/sandbox/" | rg -v "__pycache__"; then
+            echo "::error::VIOLATION: executor.execute called outside authorized paths"
+            VIOLATIONS="${VIOLATIONS}executor.execute "
+          fi
+
+          # Check for tool executor direct invocations
+          echo "Checking for direct ToolExecutor invocations..."
+          if rg -n "ToolExecutor\(" src/ | rg -v "src/sim/__init__.py" | rg -v "src/sandbox/" | rg -v "__pycache__"; then
+            echo "::warning::ToolExecutor instantiation found - verify it goes through control plane"
+          fi
+
+          # Check for mark_legitimate_execution outside engine.py (indicates potential bypass setup)
+          echo "Checking for unauthorized legitimate execution marking..."
+          if rg -n "mark_legitimate_execution\(" src/ | rg -v "src/core/engine.py" | rg -v "src/sim/__init__.py" | rg -v "__pycache__"; then
+            echo "::error::VIOLATION: mark_legitimate_execution called outside authorized paths"
+            VIOLATIONS="${VIOLATIONS}mark_legitimate_execution "
+          fi
+
+          if [ -n "$VIOLATIONS" ]; then
+            echo ""
+            echo "==================================================================="
+            echo "SEALED FUNNEL VIOLATION DETECTED"
+            echo "The following patterns were found outside authorized paths:"
+            echo "  $VIOLATIONS"
+            echo ""
+            echo "THERE IS EXACTLY ONE VALID EXECUTION PATH:"
+            echo "  validate_and_execute_action() -> ExecutionControlPlane"
+            echo ""
+            echo "All other paths are SECURITY VIOLATIONS."
+            echo "==================================================================="
+            exit 1
+          fi
+
+          echo "==================================================================="
+          echo "SEALED FUNNEL VERIFIED"
+          echo "No unauthorized execution paths detected."
+          echo "==================================================================="
+
+      - name: Verify guard order test exists
+        run: |
+          echo "Verifying guard order immutability test exists..."
+          if ! grep -q "test_guard_order_is_exact" tests/test_engine_guardrails.py; then
+            echo "::error::Missing test_guard_order_is_exact test - required for DoD compliance"
+            exit 1
+          fi
+          echo "Guard order immutability test found"
+
+      - name: Verify concurrency rate limit test exists
+        run: |
+          echo "Verifying concurrency rate limit test exists..."
+          if ! grep -q "test_concurrent_rate_limit_enforcement\|test_no_double_spend" tests/test_engine_guardrails.py; then
+            echo "::error::Missing concurrency rate limit tests - required for DoD compliance"
+            exit 1
+          fi
+          echo "Concurrency rate limit tests found"
+
       - name: Gate F Summary
         run: |
           cat > gate-f-summary.json << 'EOF'
