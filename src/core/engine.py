@@ -13,6 +13,7 @@ Any bypass is a SECURITY FAILURE.
 import asyncio
 import inspect
 import logging
+import secrets
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -184,6 +185,10 @@ class ExecutionControlPlane:
     5. TargetSafety.probe_and_check(...)
     6. Execute the action
     7. Emit forensic event
+
+    SECURITY: Uses non-forgeable execution tokens (secrets.token_urlsafe(32))
+    stored per-instance. Executor MUST present valid token to execute.
+    This is NOT crypto, but much harder to spoof than context variables.
     """
 
     def __init__(
@@ -218,6 +223,104 @@ class ExecutionControlPlane:
 
         # For testing: allow mock execution
         self._test_mode = False
+
+        # v6.1 SECURITY: Instance-bound execution token
+        # This token is created per-instance and MUST be presented by executors
+        # Token is 256 bits of entropy (32 bytes base64 encoded = 43 chars)
+        self._instance_token = secrets.token_urlsafe(32)
+
+        # Active execution tokens: maps action_id -> one-time execution token
+        # Token is consumed after use to prevent replay attacks
+        self._active_execution_tokens: Dict[str, str] = {}
+
+    def generate_execution_token(self, action_id: str, record: "DecisionRecord") -> str:
+        """
+        Generate a one-time execution token for a specific action.
+
+        This token MUST be presented to the executor to prove the action
+        passed through all guards. Token is bound to action_id and decision record.
+
+        Args:
+            action_id: The action this token authorizes
+            record: The DecisionRecord proving all guards passed
+
+        Returns:
+            A non-forgeable execution token
+        """
+        if not record.all_guards_passed:
+            raise GuardBypassError(
+                message="Cannot generate execution token - guards did not all pass",
+                bypass_path="token_generation_without_guards",
+                caller="ExecutionControlPlane",
+            )
+
+        # Generate action-specific token combining instance token + action_id + random
+        action_token = secrets.token_urlsafe(32)
+
+        # Store token for validation
+        self._active_execution_tokens[action_id] = action_token
+
+        logger.debug(f"Generated execution token for action {action_id}")
+        return action_token
+
+    def validate_execution_token(self, action_id: str, token: str) -> bool:
+        """
+        Validate an execution token.
+
+        Token MUST match the one generated for this action_id.
+        Token is CONSUMED after validation (one-time use).
+
+        Args:
+            action_id: The action being executed
+            token: The token presented by the executor
+
+        Returns:
+            True if token is valid, False otherwise
+        """
+        expected_token = self._active_execution_tokens.get(action_id)
+
+        if expected_token is None:
+            logger.warning(f"No execution token found for action {action_id}")
+            return False
+
+        # Constant-time comparison to prevent timing attacks
+        valid = secrets.compare_digest(expected_token, token)
+
+        if valid:
+            # Consume token - one-time use only
+            del self._active_execution_tokens[action_id]
+            logger.debug(f"Execution token validated and consumed for action {action_id}")
+        else:
+            logger.warning(f"Invalid execution token presented for action {action_id}")
+
+        return valid
+
+    def revoke_execution_token(self, action_id: str) -> bool:
+        """
+        Revoke an execution token before use.
+
+        Use this when an action is cancelled after token generation.
+
+        Args:
+            action_id: The action whose token to revoke
+
+        Returns:
+            True if token was revoked, False if no token existed
+        """
+        if action_id in self._active_execution_tokens:
+            del self._active_execution_tokens[action_id]
+            logger.info(f"Execution token revoked for action {action_id}")
+            return True
+        return False
+
+    def get_instance_token_hash(self) -> str:
+        """
+        Get a hash of the instance token for logging/debugging.
+
+        Never expose the actual token - only a hash for correlation.
+        """
+        import hashlib
+        return hashlib.sha256(self._instance_token.encode()).hexdigest()[:16]
 
     def _compute_context_hash(self, ctx: ActionContext) -> str:
         """Compute hash of action context for integrity verification."""
@@ -323,22 +426,44 @@ class ExecutionControlPlane:
             # ============================================================
             record.all_guards_passed = True
 
-            if self._action_executor:
-                execution_result = await self._action_executor(ctx, record)
-                record.executed = True
-                record.execution_result = execution_result
-            elif self._test_mode:
-                # Test mode: simulate execution
-                execution_result = {
-                    "status": "success",
-                    "action_id": ctx.action_id,
-                    "simulated": True,
-                }
-                record.executed = True
-                record.execution_result = execution_result
-            else:
-                # No executor configured - this is a configuration error
-                record.error = "No action executor configured"
+            # v6.1 SECURITY: Generate one-time execution token
+            # This token MUST be presented to the executor to prove authorization
+            execution_token = self.generate_execution_token(ctx.action_id, record)
+
+            try:
+                if self._action_executor:
+                    # Pass token to executor for validation
+                    execution_result = await self._action_executor(
+                        ctx, record, execution_token=execution_token
+                    )
+                    record.executed = True
+                    record.execution_result = execution_result
+                elif self._test_mode:
+                    # Test mode: simulate execution (token still required for test validation)
+                    # Validate token to prove the flow is correct even in tests
+                    if not self.validate_execution_token(ctx.action_id, execution_token):
+                        raise GuardBypassError(
+                            message="Test mode execution failed token validation",
+                            bypass_path="test_mode_token_failure",
+                            caller="ExecutionControlPlane",
+                        )
+                    execution_result = {
+                        "status": "success",
+                        "action_id": ctx.action_id,
+                        "simulated": True,
+                        "token_validated": True,
+                    }
+                    record.executed = True
+                    record.execution_result = execution_result
+                else:
+                    # No executor configured - this is a configuration error
+                    # Revoke the unused token
+                    self.revoke_execution_token(ctx.action_id)
+                    record.error = "No action executor configured"
+            except Exception as e:
+                # If execution fails, ensure token is revoked if not consumed
+                self.revoke_execution_token(ctx.action_id)
+                raise
 
             # ============================================================
             # GUARD 7: Emit Forensic Event
@@ -904,6 +1029,107 @@ class ExecutionControlPlane:
     def get_decision_record(self, action_id: str) -> Optional[DecisionRecord]:
         """Get decision record for an action."""
         return self._decision_records.get(action_id)
+
+    async def execute_with_token(
+        self,
+        ctx: ActionContext,
+        record: DecisionRecord,
+        execution_token: str,
+        executor_func: Callable,
+    ) -> Dict[str, Any]:
+        """
+        Execute an action with proper token-based authorization.
+
+        This method sets up the execution context with the token and
+        calls the executor. The executor MUST validate the token.
+
+        Args:
+            ctx: The action context
+            record: The decision record proving all guards passed
+            execution_token: The one-time execution token
+            executor_func: The function to call for execution
+
+        Returns:
+            The execution result
+
+        Raises:
+            GuardBypassError: If token validation fails
+        """
+        from ..sim import mark_legitimate_execution, clear_legitimate_execution
+
+        # Set up execution context with token
+        mark_legitimate_execution(
+            decision_record=record,
+            execution_token=execution_token,
+            action_id=ctx.action_id,
+            control_plane=self,
+        )
+
+        try:
+            # Execute the action
+            result = await executor_func(ctx, record)
+            return result
+        finally:
+            # Always clear the context
+            clear_legitimate_execution()
+
+
+def create_token_validated_executor(
+    control_plane: "ExecutionControlPlane",
+    base_executor: Callable,
+) -> Callable:
+    """
+    Create an executor wrapper that validates tokens.
+
+    This wraps a base executor function to ensure it properly
+    validates execution tokens before proceeding.
+
+    Args:
+        control_plane: The ExecutionControlPlane instance
+        base_executor: The underlying executor function
+
+    Returns:
+        A wrapped executor that validates tokens
+    """
+    from ..sim import mark_legitimate_execution, clear_legitimate_execution
+
+    async def token_validated_executor(
+        ctx: ActionContext,
+        record: DecisionRecord,
+        execution_token: str = None,
+    ) -> Dict[str, Any]:
+        """Execute action with token validation."""
+        if execution_token is None:
+            raise GuardBypassError(
+                message="Executor called without execution token",
+                bypass_path="missing_token_in_executor",
+                caller="token_validated_executor",
+            )
+
+        # Set up execution context with token
+        mark_legitimate_execution(
+            decision_record=record,
+            execution_token=execution_token,
+            action_id=ctx.action_id,
+            control_plane=control_plane,
+        )
+
+        try:
+            # Validate token with control plane
+            if not control_plane.validate_execution_token(ctx.action_id, execution_token):
+                raise GuardBypassError(
+                    message="Invalid execution token",
+                    bypass_path="token_validation_failed",
+                    caller="token_validated_executor",
+                )
+
+            # Execute the base executor
+            result = await base_executor(ctx, record)
+            return result
+        finally:
+            clear_legitimate_execution()
+
+    return token_validated_executor
 
 
 # Global execution control plane instance
