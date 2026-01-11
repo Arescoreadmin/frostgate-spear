@@ -1,0 +1,361 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frostgate.io/schemas/fgs-control-plane-contracts/dossier.manifest.v1.schema.json",
+  "title": "Dossier Manifest v1",
+  "description": "Audit-grade dossier manifest with ZK attestations and embargo support. Blueprint v6.1 §4.2.8",
+  "type": "object",
+  "required": [
+    "dossier_id",
+    "version",
+    "campaign_id",
+    "tenant_id",
+    "created_at",
+    "dossier_type",
+    "template_type",
+    "sections",
+    "evidence_bundle_refs",
+    "disclosure_embargo_policy_ref",
+    "verifier_pack_ref",
+    "integrity",
+    "sig"
+  ],
+  "properties": {
+    "dossier_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "campaign_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "tenant_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "dossier_type": {
+      "type": "string",
+      "enum": ["FULL", "EXECUTIVE_SUMMARY", "TECHNICAL_DETAIL", "COMPLIANCE", "INCIDENT_RESPONSE"],
+      "description": "Type of dossier"
+    },
+    "template_type": {
+      "type": "string",
+      "enum": ["AUDITOR_TEMPLATE", "OPERATOR_TEMPLATE", "CUSTOMER_TEMPLATE", "REGULATORY_TEMPLATE"],
+      "description": "Template used for dossier generation"
+    },
+    "classification_level": {
+      "type": "string",
+      "enum": ["UNCLASS", "CUI", "SECRET", "TOPSECRET"]
+    },
+    "sections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["section_id", "title", "content_hash"],
+        "properties": {
+          "section_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "section_type": {
+            "type": "string",
+            "enum": [
+              "EXECUTIVE_SUMMARY",
+              "SCOPE_DEFINITION",
+              "METHODOLOGY",
+              "FINDINGS",
+              "EVIDENCE_SUMMARY",
+              "RECOMMENDATIONS",
+              "APPENDIX",
+              "ATTESTATIONS",
+              "CREDENTIAL_MODE_COMPARISON"
+            ]
+          },
+          "content_hash": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          },
+          "page_range": {
+            "type": "object",
+            "properties": {
+              "start": { "type": "integer" },
+              "end": { "type": "integer" }
+            }
+          },
+          "redaction_applied": {
+            "type": "boolean"
+          },
+          "classification_level": {
+            "type": "string",
+            "enum": ["UNCLASS", "CUI", "SECRET", "TOPSECRET"]
+          }
+        }
+      }
+    },
+    "findings_summary": {
+      "type": "object",
+      "properties": {
+        "total_findings": { "type": "integer" },
+        "by_severity": {
+          "type": "object",
+          "properties": {
+            "critical": { "type": "integer" },
+            "high": { "type": "integer" },
+            "medium": { "type": "integer" },
+            "low": { "type": "integer" },
+            "informational": { "type": "integer" }
+          }
+        },
+        "by_category": {
+          "type": "object",
+          "additionalProperties": { "type": "integer" }
+        },
+        "remediation_status": {
+          "type": "object",
+          "properties": {
+            "open": { "type": "integer" },
+            "in_progress": { "type": "integer" },
+            "resolved": { "type": "integer" },
+            "accepted_risk": { "type": "integer" }
+          }
+        }
+      }
+    },
+    "credential_mode_comparison": {
+      "type": "object",
+      "description": "Comparison of findings between credential modes (per §7.4)",
+      "properties": {
+        "unauthenticated": {
+          "type": "object",
+          "properties": {
+            "findings_count": { "type": "integer" },
+            "coverage_percentage": { "type": "number" },
+            "cost_usd": { "type": "number" }
+          }
+        },
+        "authenticated": {
+          "type": "object",
+          "properties": {
+            "findings_count": { "type": "integer" },
+            "coverage_percentage": { "type": "number" },
+            "cost_usd": { "type": "number" }
+          }
+        },
+        "delta_analysis": {
+          "type": "object",
+          "properties": {
+            "additional_findings_with_auth": { "type": "integer" },
+            "coverage_improvement": { "type": "number" },
+            "cost_difference": { "type": "number" }
+          }
+        }
+      }
+    },
+    "evidence_bundle_refs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["bundle_id", "manifest_hash"],
+        "properties": {
+          "bundle_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "manifest_hash": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          },
+          "item_count": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    "zk_attestation_refs": {
+      "type": "array",
+      "description": "Optional ZK attestation references for privacy-preserving verification",
+      "items": {
+        "type": "object",
+        "required": ["attestation_id", "attestation_type", "proof_hash"],
+        "properties": {
+          "attestation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "attestation_type": {
+            "type": "string",
+            "enum": [
+              "SCOPE_COMPLIANCE",
+              "FINDINGS_COUNT_RANGE",
+              "SEVERITY_THRESHOLD",
+              "COVERAGE_THRESHOLD",
+              "BUDGET_COMPLIANCE",
+              "TIME_WINDOW_COMPLIANCE"
+            ],
+            "description": "What the attestation proves"
+          },
+          "proof_hash": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          },
+          "proof_system": {
+            "type": "string",
+            "enum": ["GROTH16", "PLONK", "STARK", "BULLETPROOFS"]
+          },
+          "verification_key_ref": {
+            "type": "string"
+          },
+          "public_inputs_hash": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          }
+        }
+      }
+    },
+    "disclosure_embargo_policy_ref": {
+      "type": "object",
+      "required": ["policy_id", "embargo_type"],
+      "properties": {
+        "policy_id": {
+          "type": "string"
+        },
+        "embargo_type": {
+          "type": "string",
+          "enum": ["NONE", "TIME_BASED", "APPROVAL_REQUIRED", "COORDINATED_DISCLOSURE"],
+          "description": "Type of embargo on dossier disclosure"
+        },
+        "embargo_until": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Embargo end date if time-based"
+        },
+        "disclosure_approvers": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Required approvers for disclosure"
+        },
+        "coordinated_parties": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "party_id": { "type": "string" },
+              "notification_status": {
+                "type": "string",
+                "enum": ["PENDING", "NOTIFIED", "ACKNOWLEDGED", "REMEDIATED"]
+              }
+            }
+          }
+        }
+      }
+    },
+    "verifier_pack_ref": {
+      "type": "object",
+      "required": ["pack_id", "pack_hash", "verification_script_version"],
+      "description": "Reference to customer verifier pack for independent validation",
+      "properties": {
+        "pack_id": {
+          "type": "string"
+        },
+        "pack_hash": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "verification_script_version": {
+          "type": "string"
+        },
+        "download_url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "signature": {
+          "type": "string",
+          "description": "Signature of verifier pack"
+        }
+      }
+    },
+    "integrity": {
+      "type": "object",
+      "required": ["dossier_hash", "merkle_root"],
+      "properties": {
+        "dossier_hash": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "merkle_root": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "anchor_refs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "anchor_type": {
+                "type": "string",
+                "enum": ["INTERNAL_LEDGER", "BLOCKCHAIN", "RFC3161_TSA", "WITNESS_SERVICE"]
+              },
+              "anchor_proof": { "type": "string" },
+              "anchored_at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          }
+        }
+      }
+    },
+    "generation_metadata": {
+      "type": "object",
+      "properties": {
+        "generator_version": { "type": "string" },
+        "generation_duration_ms": { "type": "integer" },
+        "template_version": { "type": "string" },
+        "redaction_policy_version": { "type": "string" }
+      }
+    },
+    "sig": {
+      "type": "object",
+      "required": ["algorithm", "value", "signer_id"],
+      "properties": {
+        "algorithm": {
+          "type": "string",
+          "enum": ["RS256", "ES256", "EdDSA"]
+        },
+        "value": { "type": "string" },
+        "signer_id": { "type": "string" },
+        "signed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "certificate_chain": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "witness_sig": {
+      "type": "object",
+      "description": "Optional witness signature",
+      "properties": {
+        "algorithm": { "type": "string" },
+        "value": { "type": "string" },
+        "witness_id": { "type": "string" },
+        "signed_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}

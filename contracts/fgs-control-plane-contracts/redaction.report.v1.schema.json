@@ -1,0 +1,229 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frostgate.io/schemas/fgs-control-plane-contracts/redaction.report.v1.schema.json",
+  "title": "Redaction Report v1",
+  "description": "Proves redaction applied without exposing secrets. Blueprint v6.1 §4.2.6",
+  "type": "object",
+  "required": [
+    "report_id",
+    "version",
+    "source_ref",
+    "redacted_ref",
+    "redaction_policy_version",
+    "redaction_summary",
+    "pre_redaction_hash",
+    "post_redaction_hash",
+    "applied_at",
+    "sig"
+  ],
+  "properties": {
+    "report_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique report identifier"
+    },
+    "version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "source_ref": {
+      "type": "string",
+      "description": "Reference to original unredacted content (may be sealed)"
+    },
+    "redacted_ref": {
+      "type": "string",
+      "description": "Reference to redacted content"
+    },
+    "redaction_policy_version": {
+      "type": "string",
+      "description": "Version of redaction policy applied"
+    },
+    "redaction_summary": {
+      "type": "object",
+      "required": ["total_redactions", "categories"],
+      "properties": {
+        "total_redactions": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total number of redactions applied"
+        },
+        "categories": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["category", "count"],
+            "properties": {
+              "category": {
+                "type": "string",
+                "enum": [
+                  "CREDENTIAL",
+                  "API_KEY",
+                  "PASSWORD",
+                  "PRIVATE_KEY",
+                  "TOKEN",
+                  "PII_NAME",
+                  "PII_EMAIL",
+                  "PII_PHONE",
+                  "PII_SSN",
+                  "PII_ADDRESS",
+                  "FINANCIAL",
+                  "HEALTH",
+                  "CLASSIFIED",
+                  "INTERNAL_IP",
+                  "INTERNAL_HOSTNAME",
+                  "DATABASE_CONNECTION",
+                  "OTHER_SENSITIVE"
+                ],
+                "description": "Category of redacted content"
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Number of instances redacted"
+              },
+              "detection_method": {
+                "type": "string",
+                "enum": ["PATTERN", "ML_CLASSIFIER", "DICTIONARY", "MANUAL"],
+                "description": "How this category was detected"
+              }
+            }
+          }
+        },
+        "bytes_redacted": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total bytes redacted"
+        },
+        "redaction_percentage": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Percentage of content redacted"
+        }
+      }
+    },
+    "segment_hashes": {
+      "type": "array",
+      "description": "Hashes of pre/post redaction segments for verification",
+      "items": {
+        "type": "object",
+        "required": ["segment_id", "pre_hash", "post_hash", "redaction_applied"],
+        "properties": {
+          "segment_id": {
+            "type": "string"
+          },
+          "pre_hash": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$",
+            "description": "Hash of segment before redaction"
+          },
+          "post_hash": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$",
+            "description": "Hash of segment after redaction"
+          },
+          "redaction_applied": {
+            "type": "boolean"
+          },
+          "categories_in_segment": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      }
+    },
+    "pre_redaction_hash": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$",
+      "description": "Hash of complete content before redaction"
+    },
+    "post_redaction_hash": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$",
+      "description": "Hash of complete content after redaction"
+    },
+    "applied_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When redaction was applied"
+    },
+    "redaction_engine": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "model_version": {
+          "type": "string",
+          "description": "ML model version if applicable"
+        }
+      }
+    },
+    "audit_trail": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["action", "timestamp"],
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": ["INITIATED", "PATTERN_SCAN", "ML_SCAN", "MANUAL_REVIEW", "COMPLETED", "VERIFIED"]
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "actor": {
+            "type": "string"
+          },
+          "details": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "failure_mode": {
+      "type": "object",
+      "description": "What happens on redaction failure",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["FAIL_CLOSED", "FAIL_OPEN_WITH_ALERT"],
+          "default": "FAIL_CLOSED",
+          "description": "Blueprint mandates FAIL_CLOSED"
+        },
+        "failure_occurred": {
+          "type": "boolean",
+          "default": false
+        },
+        "failure_details": {
+          "type": "string"
+        }
+      }
+    },
+    "sig": {
+      "type": "object",
+      "required": ["algorithm", "value", "signer_id"],
+      "properties": {
+        "algorithm": {
+          "type": "string",
+          "enum": ["RS256", "ES256", "EdDSA"]
+        },
+        "value": {
+          "type": "string"
+        },
+        "signer_id": {
+          "type": "string"
+        },
+        "signed_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}

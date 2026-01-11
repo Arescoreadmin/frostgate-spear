@@ -1,0 +1,237 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frostgate.io/schemas/fgs-control-plane-contracts/execution.permit.v1.schema.json",
+  "title": "Execution Permit v1",
+  "description": "Cryptographically signed permit minted by control plane, required for execution. Blueprint v6.1 §4.2.3",
+  "type": "object",
+  "required": [
+    "permit_id",
+    "campaign_id",
+    "tenant_id",
+    "mode",
+    "risk_tier",
+    "credential_mode",
+    "tool_allowlist",
+    "target_allowlist",
+    "entrypoint_allowlist",
+    "issued_at",
+    "expires_at",
+    "nonce",
+    "jti",
+    "cr_ref",
+    "sig"
+  ],
+  "properties": {
+    "permit_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for this execution permit"
+    },
+    "campaign_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Reference to the campaign this permit authorizes"
+    },
+    "tenant_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Tenant this permit is scoped to"
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["SIM", "SHADOW", "LIVE_GUARDED", "LIVE_AUTONOMOUS"],
+      "description": "Execution mode authorized by this permit"
+    },
+    "risk_tier": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 3,
+      "description": "Risk tier (1=low, 2=medium, 3=high requiring AO)"
+    },
+    "credential_mode": {
+      "type": "string",
+      "enum": ["UNAUTHENTICATED", "AUTHENTICATED", "BOTH"],
+      "description": "Credential mode for this execution"
+    },
+    "tool_allowlist": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["tool_id", "version", "certification"],
+        "properties": {
+          "tool_id": {
+            "type": "string",
+            "description": "Tool identifier from catalog"
+          },
+          "version": {
+            "type": "string",
+            "description": "Specific tool version"
+          },
+          "certification": {
+            "type": "string",
+            "enum": ["SIM_SAFE", "SHADOW_SAFE", "LIVE_SAFE"],
+            "description": "Tool certification level"
+          },
+          "parameters_schema_hash": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$",
+            "description": "Hash of allowed parameters schema"
+          }
+        }
+      },
+      "description": "Tools authorized for this execution"
+    },
+    "target_allowlist": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["target_id", "target_type"],
+        "properties": {
+          "target_id": {
+            "type": "string",
+            "description": "Target identifier (asset ID, CIDR, domain)"
+          },
+          "target_type": {
+            "type": "string",
+            "enum": ["ASSET", "NETWORK", "DOMAIN", "API_ENDPOINT"]
+          },
+          "max_actions_per_minute": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Rate limit for this target"
+          }
+        }
+      },
+      "description": "Targets authorized for this execution"
+    },
+    "entrypoint_allowlist": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["entrypoint_id", "region", "network_zone"],
+        "properties": {
+          "entrypoint_id": {
+            "type": "string",
+            "description": "Entrypoint identifier"
+          },
+          "region": {
+            "type": "string",
+            "description": "Geographic region"
+          },
+          "network_zone": {
+            "type": "string",
+            "description": "Network zone classification"
+          },
+          "egress_asn": {
+            "type": "string",
+            "description": "ASN for egress"
+          }
+        }
+      },
+      "description": "Entrypoints authorized for this execution"
+    },
+    "issued_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Permit issuance timestamp"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Permit expiration timestamp"
+    },
+    "nonce": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9+/]{32,}={0,2}$",
+      "description": "Single-use or rolling nonce for replay protection"
+    },
+    "jti": {
+      "type": "string",
+      "format": "uuid",
+      "description": "JWT ID for token tracking"
+    },
+    "cr_ref": {
+      "type": "object",
+      "required": ["cr_id", "approved_at"],
+      "description": "Change request reference (required for non-SIM)",
+      "properties": {
+        "cr_id": {
+          "type": "string",
+          "description": "Change request identifier"
+        },
+        "approved_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "approvers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "budget_limits": {
+      "type": "object",
+      "properties": {
+        "compute_hours": { "type": "number", "minimum": 0 },
+        "api_calls": { "type": "integer", "minimum": 0 },
+        "data_transfer_gb": { "type": "number", "minimum": 0 },
+        "cost_usd": { "type": "number", "minimum": 0 },
+        "soft_limit_percentage": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "default": 90,
+          "description": "Soft throttle at this percentage (Blueprint: 90%)"
+        },
+        "hard_limit_percentage": {
+          "type": "number",
+          "const": 100,
+          "description": "Hard stop at 100%"
+        }
+      }
+    },
+    "step_up_requirements": {
+      "type": "object",
+      "description": "Additional authentication requirements",
+      "properties": {
+        "required": { "type": "boolean" },
+        "method": {
+          "type": "string",
+          "enum": ["MFA", "BIOMETRIC", "HARDWARE_TOKEN", "DUAL_APPROVAL"]
+        },
+        "completed_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "sig": {
+      "type": "object",
+      "required": ["algorithm", "value", "key_id"],
+      "description": "Detached cryptographic signature",
+      "properties": {
+        "algorithm": {
+          "type": "string",
+          "enum": ["RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "EdDSA"],
+          "description": "Signature algorithm"
+        },
+        "value": {
+          "type": "string",
+          "description": "Base64-encoded signature"
+        },
+        "key_id": {
+          "type": "string",
+          "description": "Key identifier used for signing"
+        },
+        "certificate_chain": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Certificate chain for verification"
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}
