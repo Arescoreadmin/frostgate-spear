@@ -1,0 +1,436 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frostgate.io/schemas/fgs-control-plane-contracts/campaign.spec.v1.schema.json",
+  "title": "Campaign Spec v1 (Extended)",
+  "description": "Extended campaign specification with entrypoints, credential modes, and execution permit policy. Blueprint v6.1 §4.2.1",
+  "type": "object",
+  "required": [
+    "campaign_id",
+    "version",
+    "tenant_id",
+    "name",
+    "mode",
+    "risk_tier",
+    "scope_ref",
+    "entrypoints",
+    "credential_mode",
+    "preflight",
+    "execution_permit_policy",
+    "created_at",
+    "created_by"
+  ],
+  "properties": {
+    "campaign_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "tenant_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 4096
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["SIM", "SHADOW", "LIVE_GUARDED", "LIVE_AUTONOMOUS"],
+      "description": "Campaign execution mode"
+    },
+    "risk_tier": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 3,
+      "description": "Risk tier (1=low, 2=medium, 3=high requiring AO)"
+    },
+    "classification_level": {
+      "type": "string",
+      "enum": ["UNCLASS", "CUI", "SECRET", "TOPSECRET"],
+      "default": "UNCLASS"
+    },
+    "scope_ref": {
+      "type": "object",
+      "required": ["scope_id", "scope_hash"],
+      "description": "Reference to canonical scope definition",
+      "properties": {
+        "scope_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "scope_hash": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        }
+      }
+    },
+    "entrypoints": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Multi-entrypoint configuration per §7",
+      "items": {
+        "$ref": "#/$defs/EntryPointSpec"
+      }
+    },
+    "entrypoints_required": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1,
+      "description": "Number of entrypoints required for this campaign"
+    },
+    "diversity_requirements": {
+      "type": "object",
+      "description": "Diversity constraints for entrypoints",
+      "properties": {
+        "require_different_regions": {
+          "type": "boolean",
+          "default": false
+        },
+        "require_different_network_zones": {
+          "type": "boolean",
+          "default": false
+        },
+        "require_different_asn_classes": {
+          "type": "boolean",
+          "default": false
+        },
+        "minimum_unique_regions": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "minimum_unique_asns": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "credential_mode": {
+      "type": "string",
+      "enum": ["UNAUTHENTICATED", "AUTHENTICATED", "BOTH"],
+      "description": "Credential mode for campaign execution"
+    },
+    "credential_refs": {
+      "type": "array",
+      "description": "References to vault-managed credential packs (no raw secrets)",
+      "items": {
+        "type": "object",
+        "required": ["credential_pack_id", "vault_ref"],
+        "properties": {
+          "credential_pack_id": {
+            "type": "string"
+          },
+          "vault_ref": {
+            "type": "string",
+            "description": "Vault path/reference (e.g., vault:secret/data/campaign/creds)"
+          },
+          "credential_type": {
+            "type": "string",
+            "enum": ["API_KEY", "USERNAME_PASSWORD", "CERTIFICATE", "TOKEN", "SSH_KEY"]
+          },
+          "scope": {
+            "type": "string",
+            "description": "What these credentials are scoped to"
+          },
+          "rotation_policy": {
+            "type": "string",
+            "enum": ["STATIC", "ROTATE_ON_USE", "TIME_BASED"]
+          },
+          "requires_separate_approval": {
+            "type": "boolean",
+            "default": false,
+            "description": "Whether AUTHENTICATED passes require separate approval"
+          }
+        }
+      }
+    },
+    "preflight": {
+      "type": "object",
+      "required": ["status", "generated_at"],
+      "description": "Stored preflight/blast radius preview output",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["PASSED", "FAILED", "WARNINGS"],
+          "description": "Preflight check status"
+        },
+        "generated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "blast_radius_preview": {
+          "type": "object",
+          "properties": {
+            "estimated_targets": {
+              "type": "integer"
+            },
+            "estimated_actions": {
+              "type": "integer"
+            },
+            "max_concurrent_targets": {
+              "type": "integer"
+            },
+            "estimated_duration_hours": {
+              "type": "number"
+            },
+            "estimated_cost_usd": {
+              "type": "number"
+            }
+          }
+        },
+        "egress_points": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "entrypoint_id": { "type": "string" },
+              "egress_ip": { "type": "string" },
+              "asn": { "type": "string" },
+              "region": { "type": "string" }
+            }
+          }
+        },
+        "target_summary": {
+          "type": "object",
+          "properties": {
+            "total_in_scope": { "type": "integer" },
+            "by_type": {
+              "type": "object",
+              "additionalProperties": { "type": "integer" }
+            },
+            "by_criticality": {
+              "type": "object",
+              "additionalProperties": { "type": "integer" }
+            }
+          }
+        },
+        "bounds_verification": {
+          "type": "object",
+          "properties": {
+            "all_targets_in_scope": { "type": "boolean" },
+            "exclusions_honored": { "type": "boolean" },
+            "time_window_valid": { "type": "boolean" },
+            "budget_sufficient": { "type": "boolean" }
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "blocking_issues": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "execution_permit_policy": {
+      "type": "object",
+      "required": ["ttl_seconds", "nonce_strategy"],
+      "description": "Policy for execution permit generation",
+      "properties": {
+        "ttl_seconds": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 86400,
+          "description": "Permit TTL in seconds"
+        },
+        "nonce_strategy": {
+          "type": "string",
+          "enum": ["SINGLE_USE", "ROLLING", "TIME_BASED"],
+          "description": "Nonce strategy for replay protection"
+        },
+        "step_up_requirements": {
+          "type": "object",
+          "properties": {
+            "required_for_modes": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": ["LIVE_GUARDED", "LIVE_AUTONOMOUS"]
+              }
+            },
+            "method": {
+              "type": "string",
+              "enum": ["MFA", "BIOMETRIC", "HARDWARE_TOKEN", "DUAL_APPROVAL"]
+            },
+            "validity_seconds": {
+              "type": "integer",
+              "description": "How long step-up auth remains valid"
+            }
+          }
+        },
+        "auto_renewal": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether permits can be auto-renewed"
+        },
+        "max_renewals": {
+          "type": "integer",
+          "default": 0
+        }
+      }
+    },
+    "objectives": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["objective_id", "description"],
+        "properties": {
+          "objective_id": { "type": "string" },
+          "description": { "type": "string" },
+          "priority": {
+            "type": "string",
+            "enum": ["PRIMARY", "SECONDARY", "OPPORTUNISTIC"]
+          },
+          "success_criteria": { "type": "string" }
+        }
+      }
+    },
+    "persona_ref": {
+      "type": "object",
+      "properties": {
+        "persona_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "persona_hash": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "properties": {
+        "compute_hours": { "type": "number", "minimum": 0 },
+        "api_calls": { "type": "integer", "minimum": 0 },
+        "data_transfer_gb": { "type": "number", "minimum": 0 },
+        "cost_usd": { "type": "number", "minimum": 0 },
+        "soft_limit_percentage": {
+          "type": "number",
+          "default": 90,
+          "description": "Soft throttle at 90% per Blueprint"
+        }
+      }
+    },
+    "approval_chain": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["approver_id", "role", "approved_at"],
+        "properties": {
+          "approver_id": { "type": "string" },
+          "role": { "type": "string" },
+          "approved_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "signature": { "type": "string" },
+          "conditions": { "type": "string" }
+        }
+      }
+    },
+    "cr_ref": {
+      "type": "object",
+      "description": "Change request reference (required for non-SIM)",
+      "properties": {
+        "cr_id": { "type": "string" },
+        "approved_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "created_by": {
+      "type": "string"
+    },
+    "tags": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    }
+  },
+  "$defs": {
+    "EntryPointSpec": {
+      "type": "object",
+      "required": ["entrypoint_id", "region", "network_zone"],
+      "description": "Entrypoint specification per §7.1",
+      "properties": {
+        "entrypoint_id": {
+          "type": "string",
+          "description": "Unique entrypoint identifier"
+        },
+        "region": {
+          "type": "string",
+          "description": "Geographic region (e.g., us-east-1, eu-west-1)"
+        },
+        "pop": {
+          "type": "string",
+          "description": "Point of Presence identifier"
+        },
+        "network_zone": {
+          "type": "string",
+          "enum": ["PUBLIC", "PRIVATE", "HYBRID", "TOR", "VPN"],
+          "description": "Network zone classification"
+        },
+        "egress_asn": {
+          "type": "string",
+          "description": "ASN for egress traffic"
+        },
+        "egress_asn_class": {
+          "type": "string",
+          "enum": ["RESIDENTIAL", "DATACENTER", "MOBILE", "ENTERPRISE"],
+          "description": "Provider egress class"
+        },
+        "egress_ip_pool_ref": {
+          "type": "string",
+          "description": "Reference to IP pool for egress"
+        },
+        "constraints": {
+          "type": "object",
+          "properties": {
+            "max_concurrent_connections": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "rate_limit_rps": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "allowed_protocols": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": ["HTTP", "HTTPS", "TCP", "UDP", "SSH", "DNS"]
+              }
+            },
+            "geo_restrictions": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Country codes to avoid"
+            }
+          }
+        },
+        "health_check": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "interval_seconds": { "type": "integer", "default": 30 },
+            "timeout_seconds": { "type": "integer", "default": 5 }
+          }
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}

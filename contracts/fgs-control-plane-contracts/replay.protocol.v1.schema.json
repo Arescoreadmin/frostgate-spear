@@ -1,0 +1,380 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frostgate.io/schemas/fgs-control-plane-contracts/replay.protocol.v1.schema.json",
+  "title": "Replay Protocol v1",
+  "description": "Determinism protocol for replay. Blueprint v6.1 §9 (Final Boss Mandatory)",
+  "type": "object",
+  "required": [
+    "protocol_id",
+    "version",
+    "campaign_id",
+    "original_execution_id",
+    "determinism_config",
+    "snapshot_refs",
+    "nondeterministic_inputs",
+    "ordering_guarantees",
+    "replay_manifest"
+  ],
+  "properties": {
+    "protocol_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "campaign_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "original_execution_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "ID of the original execution being replayed"
+    },
+    "determinism_config": {
+      "type": "object",
+      "required": ["rng_seeding", "time_virtualization", "network_mocking"],
+      "properties": {
+        "rng_seeding": {
+          "type": "object",
+          "required": ["enabled", "seed_strategy"],
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "const": true,
+              "description": "Deterministic RNG seeding is mandatory"
+            },
+            "seed_strategy": {
+              "type": "string",
+              "enum": ["FIXED_SEED", "RECORDED_SEED", "DERIVED_FROM_CAMPAIGN"],
+              "description": "How RNG seeds are determined"
+            },
+            "master_seed": {
+              "type": "string",
+              "description": "Base64-encoded master seed"
+            },
+            "per_component_seeds": {
+              "type": "object",
+              "additionalProperties": { "type": "string" },
+              "description": "Component-specific seeds"
+            }
+          }
+        },
+        "time_virtualization": {
+          "type": "object",
+          "required": ["enabled", "strategy"],
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "const": true,
+              "description": "Time virtualization is mandatory"
+            },
+            "strategy": {
+              "type": "string",
+              "enum": ["RECORDED_TIMESTAMPS", "SIMULATED_CLOCK", "DETERMINISTIC_ADVANCE"],
+              "description": "Time virtualization strategy"
+            },
+            "epoch_start": {
+              "type": "string",
+              "format": "date-time",
+              "description": "Virtual epoch start time"
+            },
+            "time_scale_factor": {
+              "type": "number",
+              "minimum": 0,
+              "default": 1.0,
+              "description": "Time scaling factor for replay"
+            }
+          }
+        },
+        "network_mocking": {
+          "type": "object",
+          "required": ["enabled"],
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Whether network calls are mocked during replay"
+            },
+            "mock_strategy": {
+              "type": "string",
+              "enum": ["RECORDED_RESPONSES", "SYNTHETIC", "PASSTHROUGH_WITH_RECORD"],
+              "description": "How network responses are handled"
+            },
+            "response_cache_ref": {
+              "type": "string",
+              "description": "Reference to recorded network responses"
+            }
+          }
+        },
+        "entropy_sources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["source_name", "handling"],
+            "properties": {
+              "source_name": {
+                "type": "string",
+                "description": "Name of entropy source (e.g., /dev/urandom)"
+              },
+              "handling": {
+                "type": "string",
+                "enum": ["MOCK", "RECORD_REPLAY", "DETERMINISTIC"]
+              }
+            }
+          }
+        }
+      }
+    },
+    "snapshot_refs": {
+      "type": "object",
+      "required": ["environment", "tool_versions", "configs"],
+      "description": "Snapshot references for environment/tool versions/configs",
+      "properties": {
+        "environment": {
+          "type": "object",
+          "required": ["snapshot_id", "hash"],
+          "properties": {
+            "snapshot_id": {
+              "type": "string"
+            },
+            "hash": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            },
+            "os_version": {
+              "type": "string"
+            },
+            "container_image": {
+              "type": "string"
+            },
+            "container_digest": {
+              "type": "string"
+            }
+          }
+        },
+        "tool_versions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["tool_id", "version", "hash"],
+            "properties": {
+              "tool_id": { "type": "string" },
+              "version": { "type": "string" },
+              "hash": {
+                "type": "string",
+                "pattern": "^sha256:[a-f0-9]{64}$"
+              }
+            }
+          }
+        },
+        "configs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["config_name", "hash"],
+            "properties": {
+              "config_name": { "type": "string" },
+              "hash": {
+                "type": "string",
+                "pattern": "^sha256:[a-f0-9]{64}$"
+              },
+              "storage_ref": { "type": "string" }
+            }
+          }
+        },
+        "policy_bundle": {
+          "type": "object",
+          "required": ["version", "hash"],
+          "properties": {
+            "version": { "type": "string" },
+            "hash": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            }
+          }
+        }
+      }
+    },
+    "nondeterministic_inputs": {
+      "type": "array",
+      "description": "Captured nondeterministic inputs with hashes for replay",
+      "items": {
+        "type": "object",
+        "required": ["input_id", "input_type", "sequence_number", "hash", "storage_ref"],
+        "properties": {
+          "input_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "input_type": {
+            "type": "string",
+            "enum": [
+              "NETWORK_RESPONSE",
+              "EXTERNAL_API_CALL",
+              "USER_INPUT",
+              "SYSTEM_TIME",
+              "RANDOM_VALUE",
+              "ENVIRONMENT_VARIABLE",
+              "FILE_SYSTEM_STATE"
+            ]
+          },
+          "sequence_number": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "hash": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          },
+          "storage_ref": {
+            "type": "string",
+            "description": "Reference to stored input value"
+          },
+          "associated_action_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      }
+    },
+    "ordering_guarantees": {
+      "type": "object",
+      "required": ["strategy", "event_ordering"],
+      "properties": {
+        "strategy": {
+          "type": "string",
+          "enum": ["STRICT_SEQUENTIAL", "CAUSAL_ORDERING", "PARTIAL_ORDER_WITH_BARRIERS"],
+          "description": "Ordering guarantee strategy"
+        },
+        "event_ordering": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["event_id", "sequence"],
+            "properties": {
+              "event_id": { "type": "string", "format": "uuid" },
+              "sequence": { "type": "integer", "minimum": 0 },
+              "depends_on": {
+                "type": "array",
+                "items": { "type": "string", "format": "uuid" }
+              },
+              "barrier_id": { "type": "string" }
+            }
+          }
+        },
+        "barriers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["barrier_id", "after_events"],
+            "properties": {
+              "barrier_id": { "type": "string" },
+              "after_events": {
+                "type": "array",
+                "items": { "type": "string", "format": "uuid" }
+              },
+              "before_events": {
+                "type": "array",
+                "items": { "type": "string", "format": "uuid" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "replay_manifest": {
+      "type": "object",
+      "required": ["total_events", "total_actions", "expected_duration_ms"],
+      "properties": {
+        "total_events": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_actions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "expected_duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "checkpoints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["checkpoint_id", "at_event", "state_hash"],
+            "properties": {
+              "checkpoint_id": { "type": "string" },
+              "at_event": { "type": "integer" },
+              "state_hash": {
+                "type": "string",
+                "pattern": "^sha256:[a-f0-9]{64}$"
+              }
+            }
+          }
+        }
+      }
+    },
+    "variance_tolerance": {
+      "type": "object",
+      "description": "Acceptable variance between original and replay",
+      "properties": {
+        "timing_variance_ms": {
+          "type": "integer",
+          "default": 100
+        },
+        "output_diff_threshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.01,
+          "description": "Maximum acceptable output difference ratio"
+        },
+        "strict_mode": {
+          "type": "boolean",
+          "default": true,
+          "description": "Fail on any variance"
+        }
+      }
+    },
+    "debugger_config": {
+      "type": "object",
+      "description": "Configuration for Replay Debugger (WTF UX)",
+      "properties": {
+        "step_through_enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "diff_visualization": {
+          "type": "boolean",
+          "default": true
+        },
+        "breakpoints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": ["EVENT", "ACTION", "VARIANCE_DETECTED", "POLICY_DECISION"]
+              },
+              "condition": { "type": "string" }
+            }
+          }
+        },
+        "post_fix_retest": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable post-fix retest diff"
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}

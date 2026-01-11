@@ -97,7 +97,13 @@
           "type": "number",
           "minimum": 0,
           "maximum": 100,
-          "default": 80
+          "default": 90,
+          "description": "Soft throttle at 90% per Blueprint v6.1"
+        },
+        "hard_limit_percentage": {
+          "type": "number",
+          "const": 100,
+          "description": "Hard stop at 100% per Blueprint v6.1"
         }
       },
       "description": "Budget constraints for the mission"
@@ -137,6 +143,139 @@
             "type": "string"
           }
         }
+      }
+    },
+    "entrypoints": {
+      "type": "array",
+      "description": "Multi-entrypoint configuration per Blueprint v6.1 §7",
+      "items": {
+        "$ref": "#/definitions/EntryPointSpec"
+      }
+    },
+    "entrypoints_required": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1,
+      "description": "Number of entrypoints required"
+    },
+    "diversity_requirements": {
+      "type": "object",
+      "description": "Diversity constraints for entrypoints per Blueprint v6.1 §7.1",
+      "properties": {
+        "require_different_regions": {
+          "type": "boolean",
+          "default": false
+        },
+        "require_different_network_zones": {
+          "type": "boolean",
+          "default": false
+        },
+        "require_different_asn_classes": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "credential_mode": {
+      "type": "string",
+      "enum": ["UNAUTHENTICATED", "AUTHENTICATED", "BOTH"],
+      "description": "Credential mode per Blueprint v6.1 §7.3"
+    },
+    "credential_refs": {
+      "type": "array",
+      "description": "References to vault-managed credential packs (no raw secrets)",
+      "items": {
+        "type": "object",
+        "required": ["credential_pack_id", "vault_ref"],
+        "properties": {
+          "credential_pack_id": {
+            "type": "string"
+          },
+          "vault_ref": {
+            "type": "string",
+            "description": "Vault path reference"
+          },
+          "credential_type": {
+            "type": "string",
+            "enum": ["API_KEY", "USERNAME_PASSWORD", "CERTIFICATE", "TOKEN", "SSH_KEY"]
+          },
+          "requires_separate_approval": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      }
+    },
+    "preflight": {
+      "type": "object",
+      "description": "Stored preflight/blast radius preview output per Blueprint v6.1 §0",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["PASSED", "FAILED", "WARNINGS"]
+        },
+        "generated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "blast_radius_preview": {
+          "type": "object",
+          "properties": {
+            "estimated_targets": { "type": "integer" },
+            "estimated_actions": { "type": "integer" },
+            "estimated_cost_usd": { "type": "number" }
+          }
+        },
+        "egress_points": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "entrypoint_id": { "type": "string" },
+              "egress_ip": { "type": "string" },
+              "asn": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "execution_permit_policy": {
+      "type": "object",
+      "description": "Execution permit policy per Blueprint v6.1 §4.2.3",
+      "properties": {
+        "ttl_seconds": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 86400
+        },
+        "nonce_strategy": {
+          "type": "string",
+          "enum": ["SINGLE_USE", "ROLLING", "TIME_BASED"]
+        },
+        "step_up_requirements": {
+          "type": "object",
+          "properties": {
+            "required_for_modes": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": ["LIVE_GUARDED", "LIVE_AUTONOMOUS"]
+              }
+            },
+            "method": {
+              "type": "string",
+              "enum": ["MFA", "BIOMETRIC", "HARDWARE_TOKEN", "DUAL_APPROVAL"]
+            }
+          }
+        }
+      }
+    },
+    "cr_ref": {
+      "type": "object",
+      "description": "Change request reference (required for non-SIM per Blueprint v6.1 §2.9)",
+      "properties": {
+        "cr_id": { "type": "string" },
+        "approved_at": { "type": "string", "format": "date-time" }
       }
     }
   },
@@ -330,6 +469,108 @@
           "maximum": 1,
           "default": 0.95,
           "description": "Minimum forensic completeness score"
+        }
+      }
+    },
+    "EntryPointSpec": {
+      "type": "object",
+      "required": ["entrypoint_id", "region", "network_zone"],
+      "description": "Entrypoint specification per Blueprint v6.1 §7.1",
+      "properties": {
+        "entrypoint_id": {
+          "type": "string",
+          "description": "Unique entrypoint identifier"
+        },
+        "region": {
+          "type": "string",
+          "description": "Geographic region"
+        },
+        "pop": {
+          "type": "string",
+          "description": "Point of Presence identifier"
+        },
+        "network_zone": {
+          "type": "string",
+          "enum": ["PUBLIC", "PRIVATE", "HYBRID", "TOR", "VPN"],
+          "description": "Network zone classification"
+        },
+        "egress_asn": {
+          "type": "string",
+          "description": "ASN for egress traffic"
+        },
+        "egress_asn_class": {
+          "type": "string",
+          "enum": ["RESIDENTIAL", "DATACENTER", "MOBILE", "ENTERPRISE"],
+          "description": "Provider egress class"
+        },
+        "egress_ip_pool_ref": {
+          "type": "string",
+          "description": "Reference to IP pool for egress"
+        },
+        "constraints": {
+          "type": "object",
+          "properties": {
+            "max_concurrent_connections": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "rate_limit_rps": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "allowed_protocols": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": ["HTTP", "HTTPS", "TCP", "UDP", "SSH", "DNS"]
+              }
+            }
+          }
+        }
+      }
+    },
+    "TargetSafetyEnvelope": {
+      "type": "object",
+      "description": "Target safety envelope per Blueprint v6.1 §8.2",
+      "properties": {
+        "per_target_rate_limits": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "description": "Max requests per minute per target"
+          }
+        },
+        "stop_conditions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "condition": {
+                "type": "string",
+                "enum": ["TARGET_HEALTH_DEGRADED", "ERROR_RATE_EXCEEDED", "RESPONSE_TIME_EXCEEDED"]
+              },
+              "threshold": { "type": "number" },
+              "action": {
+                "type": "string",
+                "enum": ["PAUSE", "STOP", "ALERT"]
+              }
+            }
+          }
+        },
+        "blast_radius_caps": {
+          "type": "object",
+          "properties": {
+            "max_affected_assets": { "type": "integer" },
+            "max_impact_score": { "type": "number", "maximum": 100 }
+          }
+        },
+        "health_probe_gating": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "probe_interval_seconds": { "type": "integer", "default": 30 },
+            "failure_threshold": { "type": "integer", "default": 3 }
+          }
         }
       }
     }

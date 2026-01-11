@@ -1,0 +1,274 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frostgate.io/schemas/fgs-control-plane-contracts/evidence.bundle.manifest.v1.schema.json",
+  "title": "Evidence Bundle Manifest v1",
+  "description": "Defines evidence bundle contents with hashes and signatures. Blueprint v6.1 §4.2.5",
+  "type": "object",
+  "required": [
+    "manifest_id",
+    "version",
+    "campaign_id",
+    "tenant_id",
+    "created_at",
+    "bundle_hash",
+    "evidence_items",
+    "encryption_metadata",
+    "retention_class",
+    "anchor_checkpoint_refs",
+    "sig"
+  ],
+  "properties": {
+    "manifest_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique manifest identifier"
+    },
+    "version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "campaign_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "tenant_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "bundle_hash": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$",
+      "description": "Hash of entire bundle for integrity verification"
+    },
+    "evidence_items": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["item_id", "item_type", "content_hash", "size_bytes", "collected_at"],
+        "properties": {
+          "item_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "item_type": {
+            "type": "string",
+            "enum": [
+              "EXECUTION_LOG",
+              "AUDIT_TRAIL",
+              "TOOL_OUTPUT",
+              "NETWORK_CAPTURE",
+              "SCREENSHOT",
+              "MEMORY_ARTIFACT",
+              "FILE_ARTIFACT",
+              "API_RESPONSE",
+              "FINDING_REPORT",
+              "POLICY_DECISION_LOG",
+              "METRIC_SNAPSHOT"
+            ]
+          },
+          "content_hash": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "collected_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "storage_uri": {
+            "type": "string",
+            "format": "uri",
+            "description": "Location in evidence store"
+          },
+          "related_event_ids": {
+            "type": "array",
+            "items": { "type": "string", "format": "uuid" },
+            "description": "Campaign events this evidence relates to"
+          },
+          "classification_level": {
+            "type": "string",
+            "enum": ["UNCLASS", "CUI", "SECRET", "TOPSECRET"]
+          },
+          "redaction_applied": {
+            "type": "boolean",
+            "default": false
+          },
+          "redaction_report_ref": {
+            "type": "string",
+            "description": "Reference to redaction report if redacted"
+          },
+          "mime_type": {
+            "type": "string"
+          },
+          "compression": {
+            "type": "string",
+            "enum": ["NONE", "GZIP", "ZSTD", "LZ4"]
+          }
+        }
+      }
+    },
+    "encryption_metadata": {
+      "type": "object",
+      "required": ["encrypted", "algorithm"],
+      "properties": {
+        "encrypted": {
+          "type": "boolean"
+        },
+        "algorithm": {
+          "type": "string",
+          "enum": ["AES-256-GCM", "CHACHA20-POLY1305", "NONE"],
+          "description": "Encryption algorithm used"
+        },
+        "key_encryption_key_ref": {
+          "type": "string",
+          "description": "Reference to KEK in KMS"
+        },
+        "wrapped_dek": {
+          "type": "string",
+          "description": "Base64-encoded wrapped data encryption key"
+        },
+        "tenant_key_ref": {
+          "type": "string",
+          "description": "Tenant-specific key reference"
+        }
+      }
+    },
+    "retention_class": {
+      "type": "object",
+      "required": ["class", "retention_days"],
+      "properties": {
+        "class": {
+          "type": "string",
+          "enum": ["STANDARD", "COMPLIANCE", "LEGAL_HOLD", "LONG_TERM_ARCHIVE"],
+          "description": "Retention classification"
+        },
+        "retention_days": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Minimum retention period"
+        },
+        "legal_hold_ref": {
+          "type": "string",
+          "description": "Legal hold reference if applicable"
+        },
+        "deletion_eligible_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "deletion_requires_approval": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "anchor_checkpoint_refs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["checkpoint_id", "anchor_type", "anchored_at"],
+        "properties": {
+          "checkpoint_id": {
+            "type": "string"
+          },
+          "anchor_type": {
+            "type": "string",
+            "enum": ["INTERNAL_LEDGER", "BLOCKCHAIN", "RFC3161_TSA", "WITNESS_SERVICE"],
+            "description": "Type of anchoring mechanism"
+          },
+          "anchored_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "anchor_proof": {
+            "type": "string",
+            "description": "Proof of anchoring (merkle proof, tx hash, etc.)"
+          },
+          "witness_signature": {
+            "type": "string",
+            "description": "Witness service signature if applicable"
+          }
+        }
+      },
+      "description": "References to anchor checkpoints for tamper evidence"
+    },
+    "chain_of_custody": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["action", "actor", "timestamp"],
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": ["CREATED", "SEALED", "ACCESSED", "EXPORTED", "TRANSFERRED", "VERIFIED"]
+          },
+          "actor": {
+            "type": "string",
+            "description": "Identity of actor"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "signature": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "verification_hints": {
+      "type": "object",
+      "description": "Hints for verifier kit",
+      "properties": {
+        "merkle_root": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "item_count": {
+          "type": "integer"
+        },
+        "total_size_bytes": {
+          "type": "integer"
+        },
+        "verification_script_version": {
+          "type": "string"
+        }
+      }
+    },
+    "sig": {
+      "type": "object",
+      "required": ["algorithm", "value", "signer_id"],
+      "properties": {
+        "algorithm": {
+          "type": "string",
+          "enum": ["RS256", "ES256", "EdDSA"]
+        },
+        "value": {
+          "type": "string"
+        },
+        "signer_id": {
+          "type": "string"
+        },
+        "signed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "certificate_chain": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}

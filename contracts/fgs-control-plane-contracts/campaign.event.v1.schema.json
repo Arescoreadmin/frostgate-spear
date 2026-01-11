@@ -1,0 +1,280 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frostgate.io/schemas/fgs-control-plane-contracts/campaign.event.v1.schema.json",
+  "title": "Campaign Event v1",
+  "description": "Extended campaign event schema supporting WTF UX and verifiability. Blueprint v6.1 §4.2.4",
+  "type": "object",
+  "required": [
+    "event_id",
+    "campaign_id",
+    "tenant_id",
+    "timestamp",
+    "event_type",
+    "graph_node_id",
+    "graph_parent_ids",
+    "policy_decision",
+    "permit_id",
+    "entrypoint_id",
+    "credential_mode",
+    "evidence_refs",
+    "cost_delta",
+    "cost_total",
+    "sig"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique event identifier"
+    },
+    "campaign_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "tenant_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Event timestamp (ISO 8601)"
+    },
+    "sequence_number": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonic sequence number within campaign"
+    },
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "CAMPAIGN_STARTED",
+        "CAMPAIGN_PAUSED",
+        "CAMPAIGN_RESUMED",
+        "CAMPAIGN_COMPLETED",
+        "CAMPAIGN_ABORTED",
+        "ACTION_PLANNED",
+        "ACTION_APPROVED",
+        "ACTION_DENIED",
+        "ACTION_STARTED",
+        "ACTION_COMPLETED",
+        "ACTION_FAILED",
+        "TOOL_INVOKED",
+        "TOOL_RESULT",
+        "FINDING_DISCOVERED",
+        "EVIDENCE_COLLECTED",
+        "POLICY_EVALUATED",
+        "BUDGET_WARNING",
+        "BUDGET_EXCEEDED",
+        "SCOPE_VIOLATION_DETECTED",
+        "REVOCATION_RECEIVED",
+        "CHECKPOINT_CREATED",
+        "WITNESS_ATTESTATION"
+      ],
+      "description": "Type of event"
+    },
+    "graph_node_id": {
+      "type": "string",
+      "description": "Node ID in the action DAG for Live Action Graph visualization"
+    },
+    "graph_parent_ids": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Parent node IDs in the action DAG"
+    },
+    "policy_decision": {
+      "type": "object",
+      "required": ["decision", "evaluated_at"],
+      "description": "Policy evaluation result",
+      "properties": {
+        "decision": {
+          "type": "string",
+          "enum": ["ALLOW", "DENY", "ALLOW_WITH_CONDITIONS"],
+          "description": "Policy decision"
+        },
+        "reason_codes": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Machine-readable reason codes"
+        },
+        "human_readable_reason": {
+          "type": "string",
+          "description": "Human-readable explanation"
+        },
+        "remediation_hints": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Suggestions for remediation if denied"
+        },
+        "policy_version": {
+          "type": "string",
+          "description": "Version of policy bundle used"
+        },
+        "evaluated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "evaluation_duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "permit_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Execution permit that authorized this event"
+    },
+    "entrypoint_id": {
+      "type": "string",
+      "description": "Entrypoint from which this action originated"
+    },
+    "credential_mode": {
+      "type": "string",
+      "enum": ["UNAUTHENTICATED", "AUTHENTICATED", "BOTH"],
+      "description": "Credential mode for this action"
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["ref_type", "content_hash"],
+        "properties": {
+          "ref_type": {
+            "type": "string",
+            "enum": ["LOG", "TRACE", "ARTIFACT", "SCREENSHOT", "PACKET_CAPTURE", "MEMORY_DUMP"]
+          },
+          "content_hash": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$",
+            "description": "Content-addressed hash"
+          },
+          "storage_location": {
+            "type": "string",
+            "description": "URI to evidence storage"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "encryption_key_ref": {
+            "type": "string",
+            "description": "Reference to encryption key for this evidence"
+          }
+        }
+      },
+      "description": "Content-addressed evidence references"
+    },
+    "cost_delta": {
+      "type": "object",
+      "description": "Cost incurred by this event",
+      "properties": {
+        "compute_seconds": { "type": "number", "minimum": 0 },
+        "api_calls": { "type": "integer", "minimum": 0 },
+        "data_transfer_bytes": { "type": "integer", "minimum": 0 },
+        "cost_usd": { "type": "number", "minimum": 0 }
+      }
+    },
+    "cost_total": {
+      "type": "object",
+      "description": "Cumulative cost for campaign after this event",
+      "properties": {
+        "compute_hours": { "type": "number", "minimum": 0 },
+        "api_calls": { "type": "integer", "minimum": 0 },
+        "data_transfer_gb": { "type": "number", "minimum": 0 },
+        "cost_usd": { "type": "number", "minimum": 0 },
+        "budget_percentage_used": { "type": "number", "minimum": 0 }
+      }
+    },
+    "action_details": {
+      "type": "object",
+      "description": "Details specific to action events",
+      "properties": {
+        "action_id": { "type": "string", "format": "uuid" },
+        "action_type": { "type": "string" },
+        "tool_id": { "type": "string" },
+        "tool_version": { "type": "string" },
+        "target_id": { "type": "string" },
+        "parameters_hash": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "description": "Hash of action parameters (not raw params)"
+        },
+        "result_summary": { "type": "string" },
+        "duration_ms": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "finding_details": {
+      "type": "object",
+      "description": "Details for finding discovery events",
+      "properties": {
+        "finding_id": { "type": "string", "format": "uuid" },
+        "severity": {
+          "type": "string",
+          "enum": ["INFORMATIONAL", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
+        },
+        "category": { "type": "string" },
+        "cve_refs": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "affected_assets": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "sig": {
+      "type": "object",
+      "required": ["algorithm", "value", "signer_id"],
+      "description": "Service signature for this event",
+      "properties": {
+        "algorithm": {
+          "type": "string",
+          "enum": ["RS256", "ES256", "EdDSA"]
+        },
+        "value": {
+          "type": "string",
+          "description": "Base64-encoded signature"
+        },
+        "signer_id": {
+          "type": "string",
+          "description": "SPIFFE ID or service identity"
+        },
+        "signed_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "witness_sig": {
+      "type": "object",
+      "description": "Optional witness-service signature for checkpoints",
+      "properties": {
+        "algorithm": {
+          "type": "string",
+          "enum": ["RS256", "ES256", "EdDSA"]
+        },
+        "value": {
+          "type": "string"
+        },
+        "witness_id": {
+          "type": "string"
+        },
+        "checkpoint_ref": {
+          "type": "string"
+        },
+        "signed_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "chain_hash": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$",
+      "description": "Hash linking to previous event for append-only ledger"
+    }
+  },
+  "additionalProperties": false
+}
