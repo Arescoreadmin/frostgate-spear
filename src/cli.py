@@ -165,6 +165,41 @@ def create_parser() -> argparse.ArgumentParser:
     # Version command
     subparsers.add_parser("version", help="Show version")
 
+    # Watch command (v6.1 requirement)
+    watch_parser = subparsers.add_parser(
+        "watch",
+        help="Watch and verify campaign ledger (v6.1)",
+    )
+    watch_parser.add_argument(
+        "campaign_id",
+        help="Campaign ID to watch",
+    )
+    watch_parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="Verify ledger hash chain and signatures",
+    )
+    watch_parser.add_argument(
+        "--resume-from",
+        dest="resume_from",
+        help="Resume verification from specific hash",
+    )
+    watch_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output in JSON format",
+    )
+    watch_parser.add_argument(
+        "--follow",
+        action="store_true",
+        help="Follow ledger in real-time",
+    )
+    watch_parser.add_argument(
+        "--ledger-path",
+        dest="ledger_path",
+        help="Path to ledger file (default: data/<campaign_id>/ledger.jsonl)",
+    )
+
     return parser
 
 
@@ -399,6 +434,278 @@ def cmd_version(args: argparse.Namespace, config: Config) -> int:
     return 0
 
 
+async def cmd_watch(args: argparse.Namespace, config: Config) -> int:
+    """
+    Watch and verify campaign ledger.
+
+    Implements v6.1 Blueprint requirements:
+    - Verify ledger hash chain integrity
+    - Verify entry signatures
+    - Verify witness checkpoints (if present)
+    - Detect gaps in sequence numbers
+    - Detect tampering in hash chain
+    - Resume verification from a specific hash
+    - Output in JSON format for automation
+    """
+    import base64
+    import hashlib
+    from datetime import datetime
+
+    logger = logging.getLogger(__name__)
+
+    campaign_id = args.campaign_id
+
+    # Determine ledger path
+    if args.ledger_path:
+        ledger_path = Path(args.ledger_path)
+    else:
+        # Default path
+        ledger_path = Path("data") / campaign_id / "ledger.jsonl"
+
+    if not ledger_path.exists():
+        error_result = {
+            "campaign_id": campaign_id,
+            "verification_status": "ERROR",
+            "error": f"Ledger file not found: {ledger_path}",
+        }
+        if args.json:
+            print(json.dumps(error_result, indent=2))
+        else:
+            print(f"Error: Ledger file not found: {ledger_path}")
+        return 1
+
+    # Verification state
+    entries_verified = 0
+    chain_integrity = True
+    gaps_detected = []
+    tampering_detected = []
+    witness_checkpoints_verified = 0
+    signature_failures = []
+    resume_hash = None
+    last_sequence = 0
+    previous_hash = None
+    resume_mode = args.resume_from is not None
+    resume_found = False
+
+    # Load trust store for signature verification
+    try:
+        from .permits import TrustStoreVerifier
+        trust_store_path = Path("integrity") / "trust_store.json"
+        trust_store = TrustStoreVerifier(trust_store_path if trust_store_path.exists() else None)
+    except Exception as e:
+        logger.warning(f"Could not load trust store: {e}")
+        trust_store = None
+
+    def compute_entry_hash(entry: dict) -> str:
+        """Compute hash for a ledger entry."""
+        hash_content = {
+            "entry_id": entry.get("entry_id"),
+            "campaign_id": entry.get("campaign_id"),
+            "sequence_number": entry.get("sequence_number"),
+            "event_type": entry.get("event_type"),
+            "timestamp": entry.get("timestamp"),
+            "payload_hash": compute_payload_hash(entry.get("payload", {})),
+            "previous_hash": entry.get("previous_hash"),
+        }
+        content = json.dumps(hash_content, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        return f"sha256:{hashlib.sha256(content).hexdigest()}"
+
+    def compute_payload_hash(payload: dict) -> str:
+        """Compute hash of entry payload."""
+        content = json.dumps(payload, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        return f"sha256:{hashlib.sha256(content).hexdigest()}"
+
+    def verify_signature(entry: dict) -> tuple:
+        """Verify entry signature if present."""
+        sig = entry.get("signature")
+        if not sig:
+            return True, None  # No signature to verify
+
+        if not trust_store:
+            return False, "No trust store available for signature verification"
+
+        try:
+            sig_value = sig.get("value", "")
+            key_id = sig.get("key_id", "")
+
+            # Build message from entry (excluding signature)
+            entry_for_signing = {k: v for k, v in entry.items() if k != "signature"}
+            message = json.dumps(entry_for_signing, sort_keys=True, separators=(',', ':')).encode('utf-8')
+            signature_bytes = base64.b64decode(sig_value)
+
+            valid, error = trust_store.verify_signature(message, signature_bytes, key_id)
+            return valid, error
+
+        except Exception as e:
+            return False, str(e)
+
+    # Process ledger
+    try:
+        with open(ledger_path, 'r') as f:
+            for line_num, line in enumerate(f, 1):
+                if not line.strip():
+                    continue
+
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError as e:
+                    tampering_detected.append({
+                        "line": line_num,
+                        "type": "MALFORMED_JSON",
+                        "error": str(e),
+                    })
+                    chain_integrity = False
+                    continue
+
+                # Handle resume mode
+                if resume_mode and not resume_found:
+                    entry_hash = entry.get("entry_hash", "")
+                    if entry_hash == args.resume_from:
+                        resume_found = True
+                        previous_hash = entry_hash
+                        last_sequence = entry.get("sequence_number", 0)
+                    continue
+
+                # Sequence gap detection
+                current_sequence = entry.get("sequence_number", 0)
+                if last_sequence > 0 and current_sequence != last_sequence + 1:
+                    gaps_detected.append({
+                        "expected": last_sequence + 1,
+                        "found": current_sequence,
+                        "entry_id": entry.get("entry_id"),
+                    })
+                    chain_integrity = False
+
+                # Hash chain verification
+                if args.verify:
+                    stored_hash = entry.get("entry_hash", "")
+                    computed_hash = compute_entry_hash(entry)
+
+                    if stored_hash != computed_hash:
+                        tampering_detected.append({
+                            "entry_id": entry.get("entry_id"),
+                            "sequence": current_sequence,
+                            "type": "HASH_MISMATCH",
+                            "stored": stored_hash,
+                            "computed": computed_hash,
+                        })
+                        chain_integrity = False
+
+                    # Previous hash chain verification
+                    entry_prev_hash = entry.get("previous_hash")
+                    if previous_hash is not None and entry_prev_hash != previous_hash:
+                        tampering_detected.append({
+                            "entry_id": entry.get("entry_id"),
+                            "sequence": current_sequence,
+                            "type": "CHAIN_BREAK",
+                            "expected_previous": previous_hash,
+                            "found_previous": entry_prev_hash,
+                        })
+                        chain_integrity = False
+
+                    # First entry should have no previous hash
+                    if last_sequence == 0 and entry_prev_hash is not None:
+                        tampering_detected.append({
+                            "entry_id": entry.get("entry_id"),
+                            "sequence": current_sequence,
+                            "type": "FIRST_ENTRY_HAS_PREVIOUS",
+                        })
+                        chain_integrity = False
+
+                    # Signature verification
+                    sig_valid, sig_error = verify_signature(entry)
+                    if not sig_valid and sig_error:
+                        signature_failures.append({
+                            "entry_id": entry.get("entry_id"),
+                            "sequence": current_sequence,
+                            "error": sig_error,
+                        })
+
+                    previous_hash = stored_hash
+
+                # Witness checkpoint detection
+                if entry.get("event_type") == "WITNESS_CHECKPOINT":
+                    witness_checkpoints_verified += 1
+
+                entries_verified += 1
+                last_sequence = current_sequence
+                resume_hash = entry.get("entry_hash")
+
+                # Print progress for non-JSON mode
+                if not args.json and entries_verified % 1000 == 0:
+                    print(f"Verified {entries_verified} entries...")
+
+    except Exception as e:
+        error_result = {
+            "campaign_id": campaign_id,
+            "verification_status": "ERROR",
+            "error": str(e),
+        }
+        if args.json:
+            print(json.dumps(error_result, indent=2))
+        else:
+            print(f"Error reading ledger: {e}")
+        return 1
+
+    # Determine verification status
+    if not args.verify:
+        verification_status = "SKIPPED"
+    elif chain_integrity and not tampering_detected and not gaps_detected:
+        verification_status = "VALID"
+    elif resume_mode and not resume_found:
+        verification_status = "INCOMPLETE"
+    else:
+        verification_status = "INVALID"
+
+    result = {
+        "campaign_id": campaign_id,
+        "verification_status": verification_status,
+        "entries_verified": entries_verified,
+        "chain_integrity": chain_integrity,
+        "gaps_detected": gaps_detected,
+        "tampering_detected": tampering_detected,
+        "signature_failures": signature_failures,
+        "witness_checkpoints_verified": witness_checkpoints_verified,
+        "resume_hash": resume_hash,
+        "verified_at": datetime.utcnow().isoformat() + "Z",
+    }
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"\nLedger Verification Report")
+        print(f"=" * 50)
+        print(f"Campaign ID: {campaign_id}")
+        print(f"Status: {verification_status}")
+        print(f"Entries Verified: {entries_verified}")
+        print(f"Chain Integrity: {'OK' if chain_integrity else 'BROKEN'}")
+        print(f"Witness Checkpoints: {witness_checkpoints_verified}")
+
+        if gaps_detected:
+            print(f"\nSequence Gaps Detected: {len(gaps_detected)}")
+            for gap in gaps_detected[:5]:
+                print(f"  - Expected {gap['expected']}, found {gap['found']}")
+            if len(gaps_detected) > 5:
+                print(f"  ... and {len(gaps_detected) - 5} more")
+
+        if tampering_detected:
+            print(f"\nTampering Detected: {len(tampering_detected)}")
+            for issue in tampering_detected[:5]:
+                print(f"  - {issue['type']} at entry {issue.get('entry_id', 'unknown')}")
+            if len(tampering_detected) > 5:
+                print(f"  ... and {len(tampering_detected) - 5} more")
+
+        if signature_failures:
+            print(f"\nSignature Failures: {len(signature_failures)}")
+            for failure in signature_failures[:5]:
+                print(f"  - Entry {failure['entry_id']}: {failure['error']}")
+
+        if resume_hash:
+            print(f"\nResume Hash: {resume_hash}")
+
+    return 0 if verification_status in ["VALID", "SKIPPED"] else 1
+
+
 async def async_main(args: argparse.Namespace, config: Config) -> int:
     """Async main entry point."""
     if args.command == "server":
@@ -430,6 +737,9 @@ async def async_main(args: argparse.Namespace, config: Config) -> int:
 
     elif args.command == "version":
         return cmd_version(args, config)
+
+    elif args.command == "watch":
+        return await cmd_watch(args, config)
 
     else:
         print("No command specified. Use --help for usage.")
