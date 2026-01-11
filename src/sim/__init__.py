@@ -3,9 +3,14 @@ Frost Gate Spear - Simulation and Execution Engine
 
 Executes attack plans in simulation or live environments with
 sandboxed tool execution via Docker isolation.
+
+v6.1 EXECUTION CONTROL PLANE ENFORCEMENT:
+All action execution MUST flow through validate_and_execute_action().
+Direct invocation of execute methods is a SECURITY FAILURE.
 """
 
 import asyncio
+import contextvars
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -13,6 +18,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 from uuid import UUID, uuid4
 
 from ..core.config import Config
+from ..core.exceptions import GuardBypassError
 from ..core.mission import ActionResult, Mission
 from ..sandbox import (
     ToolExecutor,
@@ -25,6 +31,60 @@ from ..sandbox import (
 from ..security import SecurityManager, PolicyDecision
 
 logger = logging.getLogger(__name__)
+
+
+# Context variable to track legitimate execution paths
+# This is set by the execution control plane when invoking the executor
+_legitimate_execution: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "legitimate_execution", default=False
+)
+
+# Context variable to store the current DecisionRecord for execution tracking
+_current_decision_record: contextvars.ContextVar[Optional["DecisionRecord"]] = contextvars.ContextVar(
+    "current_decision_record", default=None
+)
+
+
+def mark_legitimate_execution(decision_record: Optional["DecisionRecord"] = None):
+    """
+    Mark the current execution context as legitimate.
+
+    This MUST be called by the execution control plane before invoking
+    any execution methods. Direct callers will not have this set.
+    """
+    _legitimate_execution.set(True)
+    if decision_record:
+        _current_decision_record.set(decision_record)
+
+
+def clear_legitimate_execution():
+    """Clear the legitimate execution marker after execution completes."""
+    _legitimate_execution.set(False)
+    _current_decision_record.set(None)
+
+
+def is_legitimate_execution() -> bool:
+    """Check if the current execution is legitimate (via control plane)."""
+    return _legitimate_execution.get()
+
+
+def get_current_decision_record() -> Optional["DecisionRecord"]:
+    """Get the current DecisionRecord if available."""
+    return _current_decision_record.get()
+
+
+def _check_bypass() -> None:
+    """
+    Check if execution is bypassing the control plane.
+
+    Raises GuardBypassError if bypass is detected.
+    """
+    if not is_legitimate_execution():
+        raise GuardBypassError(
+            message="Action execution attempted without passing through validate_and_execute_action()",
+            bypass_path="direct_executor_invocation",
+            caller="Executor",
+        )
 
 
 @dataclass
@@ -194,7 +254,15 @@ class Executor:
         context: ExecutionContext,
         mission: Mission,
     ) -> ActionResult:
-        """Execute single action."""
+        """
+        Execute single action.
+
+        v6.1 SECURITY: This method MUST only be called through the
+        execution control plane. Direct calls will raise GuardBypassError.
+        """
+        # v6.1 BYPASS PREVENTION: Verify this is a legitimate execution path
+        _check_bypass()
+
         action_id = UUID(action.get("action_id", str(uuid4())))
         action_type = action.get("type", "unknown")
         target = action.get("target", {}).get("asset", "unknown")
@@ -285,7 +353,15 @@ class Executor:
     async def _execute_live_action(
         self, action: Dict[str, Any], context: ExecutionContext
     ) -> Dict[str, Any]:
-        """Execute action in live environment using sandboxed tools."""
+        """
+        Execute action in live environment using sandboxed tools.
+
+        v6.1 SECURITY: This method MUST only be called through the
+        execution control plane. Direct calls will raise GuardBypassError.
+        """
+        # v6.1 BYPASS PREVENTION: Verify this is a legitimate execution path
+        _check_bypass()
+
         if not self._tool_executor:
             logger.warning("Tool executor not initialized, falling back to simulation")
             return await self._simulate_action(action, context)

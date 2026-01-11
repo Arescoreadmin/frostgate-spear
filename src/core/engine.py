@@ -3,29 +3,966 @@ Frost Gate Spear Core Engine
 
 Main orchestration engine coordinating all subsystems.
 Integrates safety policy evaluation, MLS validation, and SBOM verification.
+
+v6.1 EXECUTION CONTROL PLANE:
+All action execution MUST pass through validate_and_execute_action().
+This is the ONLY authorized path for action execution.
+Any bypass is a SECURITY FAILURE.
 """
 
 import asyncio
+import inspect
 import logging
-from dataclasses import dataclass
-from datetime import datetime
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from uuid import UUID, uuid4
 
 import aiohttp
 
 from .config import Config
 from .exceptions import (
+    DecisionRecordMissingError,
     FrostGateError,
+    GuardBypassError,
     MLSViolationError,
+    PermitDeniedError,
+    PermitExpiredError,
+    PolicyDeniedError,
     PolicyViolationError,
+    RateLimitedError,
     ROEViolationError,
     SafetyConstraintError,
+    ScopeDriftError,
+    SoDViolationError,
+    StepUpRequiredError,
+    TargetUnsafeError,
+    WitnessRequiredError,
 )
 from .mission import Mission, MissionState
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# EXECUTION CONTROL PLANE - v6.1 Gate F Enforcement
+# ============================================================================
+
+
+@dataclass
+class ActionContext:
+    """
+    Typed structure containing all execution context for an action.
+
+    This context MUST be provided to validate_and_execute_action().
+    All fields are required for proper guard enforcement.
+    """
+
+    tenant_id: str
+    campaign_id: str
+    mode: str  # SIM, LAB, CANARY, SHADOW, LIVE_GUARDED, LIVE_AUTONOMOUS
+    risk_tier: int  # 1, 2, or 3
+    scope_id: str
+    action: Dict[str, Any]  # The action to execute
+    target: Dict[str, Any]  # Target information
+    entrypoint: Dict[str, Any]  # Entrypoint information
+    permit: Dict[str, Any]  # Execution permit
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    # Optional fields
+    action_id: Optional[str] = None
+    permit_id: Optional[str] = None
+    executor_id: Optional[str] = None
+    approver_ids: Optional[List[str]] = None
+    human_confirmed: bool = False
+    classification_level: str = "UNCLASS"
+
+    def __post_init__(self):
+        """Generate action_id if not provided."""
+        if self.action_id is None:
+            self.action_id = str(uuid4())
+        if self.permit_id is None:
+            self.permit_id = self.permit.get("permit_id")
+
+    @property
+    def now_ms(self) -> int:
+        """Current timestamp in milliseconds."""
+        return int(self.timestamp.timestamp() * 1000)
+
+
+@dataclass
+class GuardDecisionEntry:
+    """A single guard's decision in the chain."""
+
+    guard_name: str
+    decision: str  # ALLOW, DENY, HALT, REQUIRE_CONFIRMATION
+    timestamp: datetime
+    rule: Optional[str] = None
+    reason: Optional[str] = None
+    attestation_hash: Optional[str] = None
+    details: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class DecisionRecord:
+    """
+    Records the decision of EVERY guard for an action.
+
+    This record MUST exist for every executed action.
+    If it does not exist, execution is considered INVALID.
+    """
+
+    action_id: str
+    action_context_hash: str
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    # Individual guard decisions (populated during validation)
+    permit_decision: Optional[GuardDecisionEntry] = None
+    opa_abac_decision: Optional[GuardDecisionEntry] = None
+    opa_scope_decision: Optional[GuardDecisionEntry] = None
+    runtime_guard_decision: Optional[GuardDecisionEntry] = None
+    rate_limit_decision: Optional[GuardDecisionEntry] = None
+    target_safety_decision: Optional[GuardDecisionEntry] = None
+
+    # Overall result
+    all_guards_passed: bool = False
+    executed: bool = False
+    execution_result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+    def is_complete(self) -> bool:
+        """Check if all guards have recorded decisions."""
+        return all([
+            self.permit_decision is not None,
+            self.opa_abac_decision is not None,
+            self.opa_scope_decision is not None,
+            self.runtime_guard_decision is not None,
+            self.rate_limit_decision is not None,
+            self.target_safety_decision is not None,
+        ])
+
+    def all_allow(self) -> bool:
+        """Check if all guards returned ALLOW."""
+        decisions = [
+            self.permit_decision,
+            self.opa_abac_decision,
+            self.opa_scope_decision,
+            self.runtime_guard_decision,
+            self.rate_limit_decision,
+            self.target_safety_decision,
+        ]
+        return all(d is not None and d.decision == "ALLOW" for d in decisions)
+
+
+@dataclass
+class ForensicEvent:
+    """Forensic event emitted after action execution."""
+
+    event_id: str
+    event_type: str  # ACTION_EXECUTED, ACTION_DENIED, ACTION_FAILED
+    timestamp: datetime
+    action_context: ActionContext
+    decision_record: DecisionRecord
+    outcome: str  # SUCCESS, FAILURE, BLOCKED
+    details: Dict[str, Any] = field(default_factory=dict)
+
+
+class ExecutionControlPlane:
+    """
+    Centralized execution control plane enforcing v6.1 requirements.
+
+    ALL action execution MUST flow through validate_and_execute_action().
+    This is the ONLY authorized execution path.
+
+    Guard order (exact, do not reorder):
+    1. PermitValidator.validate_action(...) - includes TTL check
+    2. OPA evaluation (ABAC + Scope lint)
+    3. RuntimeBehaviorGuard.check(...)
+    4. RateLimitCounter.check_and_increment(...)
+    5. TargetSafety.probe_and_check(...)
+    6. Execute the action
+    7. Emit forensic event
+    """
+
+    def __init__(
+        self,
+        permit_validator=None,
+        opa_client=None,
+        runtime_guard=None,
+        rate_limiter=None,
+        target_safety=None,
+        action_executor: Optional[Callable] = None,
+        forensic_emitter: Optional[Callable] = None,
+    ):
+        """
+        Initialize execution control plane.
+
+        All guard components MUST be provided for production use.
+        Missing components will cause guard bypass errors in production.
+        """
+        self._permit_validator = permit_validator
+        self._opa_client = opa_client
+        self._runtime_guard = runtime_guard
+        self._rate_limiter = rate_limiter
+        self._target_safety = target_safety
+        self._action_executor = action_executor
+        self._forensic_emitter = forensic_emitter
+
+        # Track decision records for audit
+        self._decision_records: Dict[str, DecisionRecord] = {}
+
+        # Bypass detection flag - set by internal calls only
+        self._bypass_check_enabled = True
+
+        # For testing: allow mock execution
+        self._test_mode = False
+
+    def _compute_context_hash(self, ctx: ActionContext) -> str:
+        """Compute hash of action context for integrity verification."""
+        import hashlib
+        import json
+
+        context_data = {
+            "tenant_id": ctx.tenant_id,
+            "campaign_id": ctx.campaign_id,
+            "mode": ctx.mode,
+            "risk_tier": ctx.risk_tier,
+            "scope_id": ctx.scope_id,
+            "action_id": ctx.action_id,
+            "permit_id": ctx.permit_id,
+            "timestamp": ctx.timestamp.isoformat(),
+        }
+        content = json.dumps(context_data, sort_keys=True)
+        return f"sha256:{hashlib.sha256(content.encode()).hexdigest()}"
+
+    async def validate_and_execute_action(
+        self,
+        ctx: ActionContext,
+    ) -> Tuple[DecisionRecord, Optional[Dict[str, Any]]]:
+        """
+        THE ONLY AUTHORIZED PATH FOR ACTION EXECUTION.
+
+        This function enforces all guards in exact order:
+        1. Permit validation (with TTL check)
+        2. OPA ABAC + Scope evaluation
+        3. Runtime behavior guard
+        4. Rate limit check
+        5. Target safety probe
+        6. Execute action
+        7. Emit forensic event
+
+        Args:
+            ctx: ActionContext with all execution parameters
+
+        Returns:
+            Tuple of (DecisionRecord, execution_result or None)
+
+        Raises:
+            PermitDeniedError: Permit validation failed
+            PermitExpiredError: Permit TTL expired
+            PolicyDeniedError: OPA policy denied action
+            ScopeDriftError: P2+ scope drift detected
+            StepUpRequiredError: Step-up authentication needed
+            SoDViolationError: Separation of duties violated
+            RateLimitedError: Rate limit exceeded
+            TargetUnsafeError: Target safety check failed
+            WitnessRequiredError: Dual attestation witness unavailable
+        """
+        # Initialize decision record
+        record = DecisionRecord(
+            action_id=ctx.action_id,
+            action_context_hash=self._compute_context_hash(ctx),
+        )
+
+        execution_result = None
+
+        try:
+            # ============================================================
+            # GUARD 1: Permit Validation (with TTL check)
+            # ============================================================
+            record.permit_decision = await self._check_permit(ctx)
+            if record.permit_decision.decision != "ALLOW":
+                self._raise_permit_error(record.permit_decision, ctx)
+
+            # ============================================================
+            # GUARD 2: OPA Evaluation (ABAC + Scope)
+            # ============================================================
+            record.opa_abac_decision = await self._check_opa_abac(ctx)
+            if record.opa_abac_decision.decision != "ALLOW":
+                self._raise_policy_error(record.opa_abac_decision, ctx)
+
+            record.opa_scope_decision = await self._check_opa_scope(ctx)
+            if record.opa_scope_decision.decision != "ALLOW":
+                self._raise_scope_error(record.opa_scope_decision, ctx)
+
+            # ============================================================
+            # GUARD 3: Runtime Behavior Guard
+            # ============================================================
+            record.runtime_guard_decision = await self._check_runtime_guard(ctx)
+            if record.runtime_guard_decision.decision != "ALLOW":
+                self._raise_runtime_error(record.runtime_guard_decision, ctx)
+
+            # ============================================================
+            # GUARD 4: Rate Limit Check
+            # ============================================================
+            record.rate_limit_decision = await self._check_rate_limit(ctx)
+            if record.rate_limit_decision.decision != "ALLOW":
+                self._raise_rate_limit_error(record.rate_limit_decision, ctx)
+
+            # ============================================================
+            # GUARD 5: Target Safety Probe
+            # ============================================================
+            record.target_safety_decision = await self._check_target_safety(ctx)
+            if record.target_safety_decision.decision != "ALLOW":
+                self._raise_target_safety_error(record.target_safety_decision, ctx)
+
+            # ============================================================
+            # All guards passed - EXECUTE
+            # ============================================================
+            record.all_guards_passed = True
+
+            if self._action_executor:
+                execution_result = await self._action_executor(ctx, record)
+                record.executed = True
+                record.execution_result = execution_result
+            elif self._test_mode:
+                # Test mode: simulate execution
+                execution_result = {
+                    "status": "success",
+                    "action_id": ctx.action_id,
+                    "simulated": True,
+                }
+                record.executed = True
+                record.execution_result = execution_result
+            else:
+                # No executor configured - this is a configuration error
+                record.error = "No action executor configured"
+
+            # ============================================================
+            # GUARD 7: Emit Forensic Event
+            # ============================================================
+            await self._emit_forensic_event(ctx, record, "SUCCESS")
+
+        except (
+            PermitDeniedError,
+            PermitExpiredError,
+            PolicyDeniedError,
+            ScopeDriftError,
+            StepUpRequiredError,
+            SoDViolationError,
+            RateLimitedError,
+            TargetUnsafeError,
+            WitnessRequiredError,
+        ) as e:
+            record.error = str(e)
+            await self._emit_forensic_event(ctx, record, "BLOCKED")
+            raise
+
+        except Exception as e:
+            record.error = str(e)
+            await self._emit_forensic_event(ctx, record, "FAILURE")
+            raise
+
+        finally:
+            # Store decision record for audit
+            self._decision_records[ctx.action_id] = record
+
+        return record, execution_result
+
+    # ========================================================================
+    # Guard Implementation Methods
+    # ========================================================================
+
+    async def _check_permit(self, ctx: ActionContext) -> GuardDecisionEntry:
+        """
+        Guard 1: Validate permit including TTL check.
+
+        TTL is checked PER ACTION, not just at preflight.
+        """
+        timestamp = datetime.now(timezone.utc)
+
+        if self._permit_validator is None:
+            # FAIL CLOSED - no validator means no permit validation
+            return GuardDecisionEntry(
+                guard_name="permit_validator",
+                decision="DENY",
+                timestamp=timestamp,
+                rule="PERMIT.VALIDATOR.MISSING",
+                reason="Permit validator not configured - FAIL CLOSED",
+            )
+
+        try:
+            # Check TTL first (per-action TTL check)
+            expired, remaining_ttl = self._permit_validator.check_ttl_expiry(ctx.permit)
+            if expired:
+                return GuardDecisionEntry(
+                    guard_name="permit_validator",
+                    decision="DENY",
+                    timestamp=timestamp,
+                    rule="PERMIT.EXPIRED",
+                    reason="Permit TTL has expired",
+                    details={"remaining_ttl": 0},
+                )
+
+            # Validate permit against action
+            action_data = {
+                "action_id": ctx.action_id,
+                "tool_id": ctx.action.get("tool_id") or ctx.action.get("type"),
+                "target_id": ctx.target.get("target_id") or ctx.target.get("asset"),
+                "entrypoint_id": ctx.entrypoint.get("entrypoint_id"),
+            }
+
+            result = self._permit_validator.validate_permit(
+                permit=ctx.permit,
+                action=action_data,
+                consume_nonce=False,  # Nonce already consumed at preflight
+            )
+
+            if result.valid:
+                return GuardDecisionEntry(
+                    guard_name="permit_validator",
+                    decision="ALLOW",
+                    timestamp=timestamp,
+                    rule="PERMIT.VALID",
+                    reason="Permit validated successfully",
+                    details={
+                        "remaining_ttl": remaining_ttl,
+                        "signature_verified": result.signature_verified,
+                    },
+                )
+            else:
+                return GuardDecisionEntry(
+                    guard_name="permit_validator",
+                    decision="DENY",
+                    timestamp=timestamp,
+                    rule=result.issues[0]["code"] if result.issues else "PERMIT.INVALID",
+                    reason=result.issues[0]["message"] if result.issues else "Permit validation failed",
+                    details={"issues": result.issues},
+                )
+
+        except Exception as e:
+            return GuardDecisionEntry(
+                guard_name="permit_validator",
+                decision="DENY",
+                timestamp=timestamp,
+                rule="PERMIT.ERROR",
+                reason=f"Permit validation error: {e}",
+            )
+
+    async def _check_opa_abac(self, ctx: ActionContext) -> GuardDecisionEntry:
+        """
+        Guard 2a: OPA ABAC (SoD + step-up) evaluation.
+        """
+        timestamp = datetime.now(timezone.utc)
+
+        # Check Separation of Duties for high-risk LIVE modes
+        if ctx.mode in ("LIVE_GUARDED", "LIVE_AUTONOMOUS") and ctx.risk_tier >= 2:
+            if ctx.executor_id and ctx.approver_ids:
+                if ctx.executor_id in ctx.approver_ids:
+                    return GuardDecisionEntry(
+                        guard_name="opa_abac",
+                        decision="DENY",
+                        timestamp=timestamp,
+                        rule="ABAC.SOD.VIOLATION",
+                        reason="Executor cannot be an approver for risk tier 2+ in LIVE modes",
+                        details={
+                            "executor_id": ctx.executor_id,
+                            "approver_ids": ctx.approver_ids,
+                        },
+                    )
+
+        # Check step-up requirements
+        action_type = ctx.action.get("type", "")
+        requires_stepup = (
+            ctx.action.get("destructive", False) or
+            ctx.action.get("credential_access", False) or
+            ctx.action.get("scope_expansion", False) or
+            (ctx.risk_tier >= 3 and ctx.mode != "SIM") or
+            ctx.classification_level in ("SECRET", "TOPSECRET")
+        )
+
+        if requires_stepup and not ctx.action.get("step_up_completed", False):
+            return GuardDecisionEntry(
+                guard_name="opa_abac",
+                decision="DENY",
+                timestamp=timestamp,
+                rule="ABAC.STEPUP.REQUIRED",
+                reason="Step-up authentication required for this action",
+                details={
+                    "action_type": action_type,
+                    "risk_tier": ctx.risk_tier,
+                    "classification": ctx.classification_level,
+                },
+            )
+
+        # If OPA client is available, query it
+        if self._opa_client:
+            try:
+                result = await self._query_opa_abac(ctx)
+                if not result.get("allow", False):
+                    return GuardDecisionEntry(
+                        guard_name="opa_abac",
+                        decision="DENY",
+                        timestamp=timestamp,
+                        rule=result.get("rule", "OPA.ABAC.DENIED"),
+                        reason=result.get("reason", "OPA ABAC policy denied"),
+                        details=result,
+                    )
+            except Exception as e:
+                # FAIL CLOSED on OPA errors
+                return GuardDecisionEntry(
+                    guard_name="opa_abac",
+                    decision="DENY",
+                    timestamp=timestamp,
+                    rule="OPA.ERROR",
+                    reason=f"OPA ABAC evaluation failed: {e}",
+                )
+
+        return GuardDecisionEntry(
+            guard_name="opa_abac",
+            decision="ALLOW",
+            timestamp=timestamp,
+            rule="ABAC.PASSED",
+            reason="ABAC checks passed",
+        )
+
+    async def _check_opa_scope(self, ctx: ActionContext) -> GuardDecisionEntry:
+        """
+        Guard 2b: OPA Scope lint evaluation.
+
+        P2+ scope drift MUST halt execution.
+        """
+        timestamp = datetime.now(timezone.utc)
+
+        # If OPA client available, check scope drift
+        if self._opa_client:
+            try:
+                result = await self._query_opa_scope(ctx)
+                drift_score = result.get("drift_score", 0.0)
+                severity = result.get("severity", "P1")
+
+                # P2+ drift halts execution
+                if severity in ("P2", "P3", "P4", "P5"):
+                    return GuardDecisionEntry(
+                        guard_name="opa_scope",
+                        decision="HALT",
+                        timestamp=timestamp,
+                        rule="RUNTIME.SCOPE.DRIFT",
+                        reason=f"Scope drift {severity} detected ({drift_score:.2%})",
+                        details={
+                            "drift_score": drift_score,
+                            "severity": severity,
+                            "action_required": "HALT_AND_REVOKE",
+                        },
+                    )
+            except Exception as e:
+                # FAIL CLOSED
+                return GuardDecisionEntry(
+                    guard_name="opa_scope",
+                    decision="DENY",
+                    timestamp=timestamp,
+                    rule="OPA.SCOPE.ERROR",
+                    reason=f"OPA scope evaluation failed: {e}",
+                )
+
+        return GuardDecisionEntry(
+            guard_name="opa_scope",
+            decision="ALLOW",
+            timestamp=timestamp,
+            rule="SCOPE.VALID",
+            reason="Scope validation passed",
+        )
+
+    async def _check_runtime_guard(self, ctx: ActionContext) -> GuardDecisionEntry:
+        """
+        Guard 3: Runtime behavior guard check.
+
+        Enforces mode-aware contracts.
+        If dual attestation required and witness unavailable, HALT.
+        """
+        timestamp = datetime.now(timezone.utc)
+
+        # Check if dual attestation is required
+        requires_dual_attestation = ctx.mode in (
+            "CANARY", "SHADOW", "LIVE_GUARDED", "LIVE_AUTONOMOUS"
+        )
+
+        if self._runtime_guard is None:
+            # FAIL CLOSED
+            return GuardDecisionEntry(
+                guard_name="runtime_guard",
+                decision="DENY",
+                timestamp=timestamp,
+                rule="RUNTIME.GUARD.MISSING",
+                reason="Runtime guard not configured - FAIL CLOSED",
+            )
+
+        try:
+            from ..runtime_guard import ExecutionMode, AutonomyLevel, Decision
+
+            mode = ExecutionMode(ctx.mode)
+            autonomy = AutonomyLevel(ctx.action.get("autonomy_level", 1))
+
+            decision = self._runtime_guard.enforce_action(
+                action={
+                    "action_id": ctx.action_id,
+                    "target_id": ctx.target.get("target_id"),
+                    "action_type": ctx.action.get("type"),
+                    "destructive": ctx.action.get("destructive", False),
+                    "expands_scope": ctx.action.get("scope_expansion", False),
+                    "is_live_target": ctx.mode != "SIM",
+                },
+                mode=mode,
+                autonomy_level=autonomy,
+                campaign_id=ctx.campaign_id,
+                human_confirmed=ctx.human_confirmed,
+            )
+
+            if decision.decision == Decision.ALLOW:
+                return GuardDecisionEntry(
+                    guard_name="runtime_guard",
+                    decision="ALLOW",
+                    timestamp=timestamp,
+                    rule=decision.rule,
+                    reason=decision.reason,
+                    attestation_hash=decision.attestation_hash,
+                )
+            elif decision.decision == Decision.REQUIRE_CONFIRMATION:
+                return GuardDecisionEntry(
+                    guard_name="runtime_guard",
+                    decision="DENY",
+                    timestamp=timestamp,
+                    rule=decision.rule,
+                    reason=decision.reason,
+                    details={"requires_confirmation": True},
+                )
+            else:
+                return GuardDecisionEntry(
+                    guard_name="runtime_guard",
+                    decision="DENY",
+                    timestamp=timestamp,
+                    rule=decision.rule,
+                    reason=decision.reason,
+                    details=decision.details,
+                )
+
+        except Exception as e:
+            return GuardDecisionEntry(
+                guard_name="runtime_guard",
+                decision="DENY",
+                timestamp=timestamp,
+                rule="RUNTIME.ERROR",
+                reason=f"Runtime guard check failed: {e}",
+            )
+
+    async def _check_rate_limit(self, ctx: ActionContext) -> GuardDecisionEntry:
+        """
+        Guard 4: Rate limit check.
+
+        Uses persistent sliding window. Exceeding limit MUST halt.
+        """
+        timestamp = datetime.now(timezone.utc)
+
+        if self._rate_limiter is None:
+            # In test mode or no limiter, allow but log warning
+            logger.warning("Rate limiter not configured - allowing action")
+            return GuardDecisionEntry(
+                guard_name="rate_limiter",
+                decision="ALLOW",
+                timestamp=timestamp,
+                rule="RATE.LIMITER.MISSING",
+                reason="Rate limiter not configured",
+            )
+
+        try:
+            target_id = ctx.target.get("target_id") or ctx.target.get("asset")
+
+            # Get mode-specific limit
+            mode_limits = {
+                "SIM": 1000,
+                "LAB": 60,
+                "CANARY": 30,
+                "SHADOW": 10,
+                "LIVE_GUARDED": 5,
+                "LIVE_AUTONOMOUS": 10,
+            }
+            max_rate = mode_limits.get(ctx.mode, 60)
+
+            allowed, current_rate = self._rate_limiter.check_rate(target_id, max_rate)
+
+            if allowed:
+                return GuardDecisionEntry(
+                    guard_name="rate_limiter",
+                    decision="ALLOW",
+                    timestamp=timestamp,
+                    rule="RATE.ALLOWED",
+                    reason=f"Rate {current_rate}/{max_rate} within limit",
+                    details={"current_rate": current_rate, "max_rate": max_rate},
+                )
+            else:
+                return GuardDecisionEntry(
+                    guard_name="rate_limiter",
+                    decision="DENY",
+                    timestamp=timestamp,
+                    rule="RUNTIME.RATE.EXCEEDED",
+                    reason=f"Rate limit exceeded: {current_rate}/{max_rate}",
+                    details={"current_rate": current_rate, "max_rate": max_rate},
+                )
+
+        except Exception as e:
+            return GuardDecisionEntry(
+                guard_name="rate_limiter",
+                decision="DENY",
+                timestamp=timestamp,
+                rule="RATE.ERROR",
+                reason=f"Rate limit check failed: {e}",
+            )
+
+    async def _check_target_safety(self, ctx: ActionContext) -> GuardDecisionEntry:
+        """
+        Guard 5: Target safety probe and check.
+
+        Health probe before targeting. Stop conditions MUST halt.
+        """
+        timestamp = datetime.now(timezone.utc)
+
+        if self._target_safety is None:
+            # In test mode, allow but warn
+            logger.warning("Target safety not configured - allowing action")
+            return GuardDecisionEntry(
+                guard_name="target_safety",
+                decision="ALLOW",
+                timestamp=timestamp,
+                rule="TARGET.SAFETY.MISSING",
+                reason="Target safety not configured",
+            )
+
+        try:
+            target_id = ctx.target.get("target_id") or ctx.target.get("asset")
+
+            result = await self._target_safety.check_action_safety(
+                target_id=target_id,
+                action=ctx.action,
+            )
+
+            if result.allowed:
+                return GuardDecisionEntry(
+                    guard_name="target_safety",
+                    decision="ALLOW",
+                    timestamp=timestamp,
+                    rule="TARGET.SAFE",
+                    reason="Target safety checks passed",
+                    details={"warnings": result.warnings},
+                )
+            else:
+                return GuardDecisionEntry(
+                    guard_name="target_safety",
+                    decision="DENY",
+                    timestamp=timestamp,
+                    rule=f"TARGET.{result.stop_condition.name}" if result.stop_condition else "TARGET.UNSAFE",
+                    reason=result.reason,
+                    details={"stop_condition": str(result.stop_condition) if result.stop_condition else None},
+                )
+
+        except Exception as e:
+            return GuardDecisionEntry(
+                guard_name="target_safety",
+                decision="DENY",
+                timestamp=timestamp,
+                rule="TARGET.ERROR",
+                reason=f"Target safety check failed: {e}",
+            )
+
+    # ========================================================================
+    # Error Raising Methods
+    # ========================================================================
+
+    def _raise_permit_error(self, decision: GuardDecisionEntry, ctx: ActionContext):
+        """Raise appropriate permit error based on decision."""
+        if decision.rule == "PERMIT.EXPIRED":
+            raise PermitExpiredError(
+                message=decision.reason,
+                permit_id=ctx.permit_id,
+                expired_at=ctx.permit.get("expires_at"),
+                action_id=ctx.action_id,
+            )
+        else:
+            raise PermitDeniedError(
+                message=decision.reason,
+                permit_id=ctx.permit_id,
+                reason=decision.rule,
+                issues=decision.details.get("issues", []),
+            )
+
+    def _raise_policy_error(self, decision: GuardDecisionEntry, ctx: ActionContext):
+        """Raise appropriate policy error based on decision."""
+        if decision.rule == "ABAC.STEPUP.REQUIRED":
+            raise StepUpRequiredError(
+                message=decision.reason,
+                action_id=ctx.action_id,
+                reason=decision.reason,
+            )
+        elif decision.rule == "ABAC.SOD.VIOLATION":
+            raise SoDViolationError(
+                message=decision.reason,
+                executor_id=ctx.executor_id,
+            )
+        else:
+            raise PolicyDeniedError(
+                message=decision.reason,
+                decision=decision.decision,
+                violations=[decision.reason] if decision.reason else [],
+            )
+
+    def _raise_scope_error(self, decision: GuardDecisionEntry, ctx: ActionContext):
+        """Raise scope drift error."""
+        raise ScopeDriftError(
+            message=decision.reason,
+            drift_score=decision.details.get("drift_score", 0.0),
+            severity=decision.details.get("severity", "P2"),
+        )
+
+    def _raise_runtime_error(self, decision: GuardDecisionEntry, ctx: ActionContext):
+        """Raise appropriate runtime error based on decision."""
+        if decision.details.get("requires_confirmation"):
+            raise PolicyDeniedError(
+                message=decision.reason,
+                decision="REQUIRE_CONFIRMATION",
+            )
+        elif "witness" in decision.rule.lower():
+            raise WitnessRequiredError(
+                message=decision.reason,
+                action_id=ctx.action_id,
+                mode=ctx.mode,
+            )
+        else:
+            raise PolicyDeniedError(
+                message=decision.reason,
+                decision=decision.decision,
+            )
+
+    def _raise_rate_limit_error(self, decision: GuardDecisionEntry, ctx: ActionContext):
+        """Raise rate limit error."""
+        raise RateLimitedError(
+            message=decision.reason,
+            target_id=ctx.target.get("target_id"),
+            current_rate=decision.details.get("current_rate", 0),
+            max_rate=decision.details.get("max_rate", 0),
+        )
+
+    def _raise_target_safety_error(self, decision: GuardDecisionEntry, ctx: ActionContext):
+        """Raise target safety error."""
+        raise TargetUnsafeError(
+            message=decision.reason,
+            target_id=ctx.target.get("target_id"),
+            stop_condition=decision.details.get("stop_condition"),
+        )
+
+    # ========================================================================
+    # Helper Methods
+    # ========================================================================
+
+    async def _query_opa_abac(self, ctx: ActionContext) -> Dict[str, Any]:
+        """Query OPA for ABAC decision."""
+        # Stub - would query OPA in production
+        return {"allow": True}
+
+    async def _query_opa_scope(self, ctx: ActionContext) -> Dict[str, Any]:
+        """Query OPA for scope lint decision."""
+        # Stub - would query OPA in production
+        return {"allow": True, "drift_score": 0.0, "severity": "P0"}
+
+    async def _emit_forensic_event(
+        self,
+        ctx: ActionContext,
+        record: DecisionRecord,
+        outcome: str,
+    ):
+        """Emit forensic event for audit trail."""
+        event = ForensicEvent(
+            event_id=str(uuid4()),
+            event_type="ACTION_EXECUTED" if outcome == "SUCCESS" else "ACTION_DENIED",
+            timestamp=datetime.now(timezone.utc),
+            action_context=ctx,
+            decision_record=record,
+            outcome=outcome,
+        )
+
+        if self._forensic_emitter:
+            try:
+                await self._forensic_emitter(event)
+            except Exception as e:
+                logger.error(f"Failed to emit forensic event: {e}")
+
+        # Log for debugging
+        logger.info(
+            f"Forensic event: {event.event_type} action={ctx.action_id} outcome={outcome}"
+        )
+
+    def get_decision_record(self, action_id: str) -> Optional[DecisionRecord]:
+        """Get decision record for an action."""
+        return self._decision_records.get(action_id)
+
+
+# Global execution control plane instance
+_execution_control_plane: Optional[ExecutionControlPlane] = None
+
+
+def get_execution_control_plane() -> ExecutionControlPlane:
+    """Get the global execution control plane instance."""
+    global _execution_control_plane
+    if _execution_control_plane is None:
+        _execution_control_plane = ExecutionControlPlane()
+    return _execution_control_plane
+
+
+def set_execution_control_plane(ecp: ExecutionControlPlane):
+    """Set the global execution control plane instance (for testing)."""
+    global _execution_control_plane
+    _execution_control_plane = ecp
+
+
+async def validate_and_execute_action(
+    ctx: ActionContext,
+) -> Tuple[DecisionRecord, Optional[Dict[str, Any]]]:
+    """
+    THE ONLY AUTHORIZED PATH FOR ACTION EXECUTION.
+
+    This is the public API for action execution.
+    All actions MUST flow through this function.
+
+    See ExecutionControlPlane.validate_and_execute_action for details.
+    """
+    ecp = get_execution_control_plane()
+    return await ecp.validate_and_execute_action(ctx)
+
+
+def check_bypass_attempt(caller_frame=None) -> bool:
+    """
+    Check if the current call is a bypass attempt.
+
+    This is called by protected execution paths to detect
+    when code attempts to execute actions without going
+    through validate_and_execute_action().
+
+    Returns:
+        True if bypass detected, False if legitimate call
+    """
+    if caller_frame is None:
+        caller_frame = inspect.currentframe().f_back
+
+    # Get the call stack
+    stack = inspect.stack()
+
+    # Look for validate_and_execute_action in the call stack
+    for frame_info in stack:
+        if frame_info.function == "validate_and_execute_action":
+            return False  # Legitimate call
+
+    # If we got here without finding the chokepoint, it's a bypass
+    return True
 
 
 class SafetyPolicyEvaluator:
