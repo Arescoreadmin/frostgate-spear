@@ -1111,6 +1111,251 @@ class StrictValidator:
             )
 
     # ========================================================================
+    # 4.2 SCOPE DRIFT DETECTION (MANDATORY)
+    # ========================================================================
+
+    def validate_scope_drift(
+        self,
+        executed_actions: List[Dict],
+        approved_scope: Dict,
+        drift_threshold: float = 0.15,
+    ) -> None:
+        """
+        Validate scope drift detection.
+
+        MANDATORY checks:
+        - Compute semantic representation of executed action graph
+        - Compare against approved scope intent
+        - Detect semantic drift beyond threshold
+
+        Responses:
+        - P1 (drift < threshold): alert only
+        - P2+ (drift >= threshold): halt + scoped revoke
+
+        Failure code: RUNTIME.SCOPE.DRIFT
+        """
+        logger.info("Validating scope drift...")
+
+        if not executed_actions:
+            return  # No actions to check
+
+        # Extract approved scope boundaries
+        approved_assets = set()
+        approved_networks = set()
+        approved_domains = set()
+
+        for asset in approved_scope.get("assets", []):
+            approved_assets.add(asset.get("asset_id"))
+
+        for network in approved_scope.get("boundaries", {}).get("networks", []):
+            approved_networks.add(network.get("cidr"))
+
+        for domain in approved_scope.get("boundaries", {}).get("domains", []):
+            approved_domains.add(domain.get("domain"))
+
+        # Compute semantic representation of executed actions
+        executed_targets = set()
+        executed_networks = set()
+        executed_domains = set()
+        out_of_scope_actions = []
+
+        for action in executed_actions:
+            target_id = action.get("target_id")
+            target_network = action.get("target_network")
+            target_domain = action.get("target_domain")
+
+            if target_id:
+                executed_targets.add(target_id)
+            if target_network:
+                executed_networks.add(target_network)
+            if target_domain:
+                executed_domains.add(target_domain)
+
+            # Check if action is within approved scope
+            in_scope = False
+
+            # Check asset scope
+            if target_id and target_id in approved_assets:
+                in_scope = True
+
+            # Check network scope (CIDR containment check)
+            if target_network:
+                for approved_cidr in approved_networks:
+                    if self._is_ip_in_cidr(target_network, approved_cidr):
+                        in_scope = True
+                        break
+
+            # Check domain scope
+            if target_domain:
+                for approved_domain in approved_domains:
+                    if self._is_domain_in_scope(target_domain, approved_domain):
+                        in_scope = True
+                        break
+
+            if not in_scope and (target_id or target_network or target_domain):
+                out_of_scope_actions.append(action)
+
+        # Calculate drift score
+        total_actions = len(executed_actions)
+        drift_count = len(out_of_scope_actions)
+        drift_score = drift_count / total_actions if total_actions > 0 else 0.0
+
+        # Determine severity and response
+        if drift_score > 0:
+            severity = self._calculate_drift_severity(drift_score, drift_threshold)
+
+            if severity >= 2:  # P2 or higher
+                raise ValidationFailure(
+                    rule="RUNTIME.SCOPE.DRIFT",
+                    reason=f"Scope drift detected: {drift_score:.2%} of actions outside approved scope (P{severity})",
+                    details={
+                        "drift_score": drift_score,
+                        "threshold": drift_threshold,
+                        "severity": f"P{severity}",
+                        "out_of_scope_count": drift_count,
+                        "total_actions": total_actions,
+                        "out_of_scope_actions": [
+                            {"action_id": a.get("action_id"), "target": a.get("target_id")}
+                            for a in out_of_scope_actions[:10]  # First 10 violations
+                        ],
+                        "action_required": "HALT_AND_REVOKE",
+                    },
+                )
+            else:  # P1 - alert only
+                logger.warning(
+                    f"Scope drift alert (P1): {drift_score:.2%} drift detected",
+                    extra={
+                        "drift_score": drift_score,
+                        "out_of_scope_count": drift_count,
+                    }
+                )
+
+        logger.info(f"Scope drift validation PASSED (drift: {drift_score:.2%})")
+
+    def _is_ip_in_cidr(self, ip: str, cidr: str) -> bool:
+        """Check if IP address is within CIDR range."""
+        try:
+            import ipaddress
+            # Handle both IP and CIDR inputs
+            if "/" in ip:
+                ip_net = ipaddress.ip_network(ip, strict=False)
+                cidr_net = ipaddress.ip_network(cidr, strict=False)
+                return ip_net.subnet_of(cidr_net)
+            else:
+                ip_addr = ipaddress.ip_address(ip)
+                cidr_net = ipaddress.ip_network(cidr, strict=False)
+                return ip_addr in cidr_net
+        except (ValueError, TypeError):
+            return False
+
+    def _is_domain_in_scope(self, target_domain: str, approved_domain: str) -> bool:
+        """Check if target domain is within approved domain scope."""
+        target_domain = target_domain.lower().strip(".")
+        approved_domain = approved_domain.lower().strip(".")
+
+        # Exact match
+        if target_domain == approved_domain:
+            return True
+
+        # Subdomain match (*.example.com includes sub.example.com)
+        if target_domain.endswith("." + approved_domain):
+            return True
+
+        return False
+
+    def _calculate_drift_severity(self, drift_score: float, threshold: float) -> int:
+        """Calculate drift severity level (P1-P5)."""
+        if drift_score < threshold * 0.5:
+            return 1  # P1 - minor drift, alert only
+        elif drift_score < threshold:
+            return 2  # P2 - moderate drift, halt
+        elif drift_score < threshold * 2:
+            return 3  # P3 - significant drift
+        elif drift_score < threshold * 3:
+            return 4  # P4 - severe drift
+        else:
+            return 5  # P5 - critical drift
+
+    # ========================================================================
+    # 4.5 COST CONTROLLER ENFORCEMENT (MANDATORY)
+    # ========================================================================
+
+    def validate_cost_controller(
+        self,
+        campaign_id: str,
+        current_cost: float,
+        budget_limit: float,
+        action_cost_delta: float,
+        soft_threshold: float = 0.90,
+        hard_threshold: float = 1.0,
+    ) -> Dict:
+        """
+        Validate cost controller enforcement.
+
+        MANDATORY checks:
+        - Soft throttle at 90% of budget (warning, reduced rate)
+        - Hard stop at 100% of budget (halt execution)
+        - Cost delta recorded per action
+
+        Failure code: RUNTIME.BUDGET.EXCEEDED
+        """
+        logger.info(f"Validating cost controller for campaign {campaign_id}...")
+
+        if budget_limit <= 0:
+            raise ValidationFailure(
+                rule="RUNTIME.BUDGET.INVALID_LIMIT",
+                reason="Budget limit must be positive",
+            )
+
+        # Calculate projected cost after action
+        projected_cost = current_cost + action_cost_delta
+        budget_utilization = projected_cost / budget_limit
+
+        # Hard stop at 100%
+        if budget_utilization >= hard_threshold:
+            raise ValidationFailure(
+                rule="RUNTIME.BUDGET.EXCEEDED",
+                reason=f"Budget limit exceeded: {budget_utilization:.1%} of ${budget_limit:.2f}",
+                details={
+                    "campaign_id": campaign_id,
+                    "current_cost": current_cost,
+                    "action_cost_delta": action_cost_delta,
+                    "projected_cost": projected_cost,
+                    "budget_limit": budget_limit,
+                    "utilization": budget_utilization,
+                    "action_required": "HARD_STOP",
+                },
+            )
+
+        # Soft throttle at 90%
+        throttle_applied = False
+        if budget_utilization >= soft_threshold:
+            logger.warning(
+                f"Budget soft threshold reached: {budget_utilization:.1%}",
+                extra={
+                    "campaign_id": campaign_id,
+                    "utilization": budget_utilization,
+                    "action": "THROTTLE",
+                }
+            )
+            throttle_applied = True
+
+        result = {
+            "campaign_id": campaign_id,
+            "current_cost": current_cost,
+            "action_cost_delta": action_cost_delta,
+            "projected_cost": projected_cost,
+            "budget_limit": budget_limit,
+            "utilization": budget_utilization,
+            "throttle_applied": throttle_applied,
+            "status": "THROTTLED" if throttle_applied else "OK",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+        logger.info(f"Cost controller validation PASSED (utilization: {budget_utilization:.1%})")
+        return result
+
+    # ========================================================================
     # 5. EVIDENCE & LEDGER INTEGRITY
     # ========================================================================
 
@@ -1505,6 +1750,354 @@ class StrictValidator:
 
         logger.info("Verifier compatibility validation PASSED")
 
+    # ========================================================================
+    # 5. STRUCTURAL NO-BYPASS ENFORCEMENT (MANDATORY)
+    # ========================================================================
+
+    def validate_structural_no_bypass(
+        self,
+        system_config: Dict,
+        network_policies: List[Dict],
+        admission_policies: List[Dict],
+        ci_bypass_check_result: Optional[Dict] = None,
+    ) -> None:
+        """
+        Validate structural no-bypass enforcement.
+
+        MANDATORY checks:
+        - Orchestrator is the sole execution entrypoint
+        - Tools cannot be invoked directly
+        - Network and admission policies enforce isolation
+        - CI fails if bypass paths exist
+
+        Failure code: STRUCTURAL.NO_BYPASS.VIOLATION
+        """
+        logger.info("Validating structural no-bypass enforcement...")
+
+        # Check orchestrator is sole entrypoint
+        execution_entrypoints = system_config.get("execution_entrypoints", [])
+        if not execution_entrypoints:
+            raise ValidationFailure(
+                rule="STRUCTURAL.NO_BYPASS.NO_ENTRYPOINT",
+                reason="No execution entrypoints configured",
+            )
+
+        orchestrator_only = all(
+            ep.get("type") == "ORCHESTRATOR" for ep in execution_entrypoints
+        )
+        if not orchestrator_only:
+            non_orchestrator = [
+                ep for ep in execution_entrypoints
+                if ep.get("type") != "ORCHESTRATOR"
+            ]
+            raise ValidationFailure(
+                rule="STRUCTURAL.NO_BYPASS.DIRECT_TOOL_ACCESS",
+                reason="Non-orchestrator execution entrypoints detected",
+                details={
+                    "violation_count": len(non_orchestrator),
+                    "violating_entrypoints": [
+                        {"id": ep.get("id"), "type": ep.get("type")}
+                        for ep in non_orchestrator
+                    ],
+                },
+            )
+
+        # Verify tools cannot be invoked directly
+        tool_exposure = system_config.get("tool_exposure", {})
+        if tool_exposure.get("direct_invocation_enabled", False):
+            raise ValidationFailure(
+                rule="STRUCTURAL.NO_BYPASS.TOOL_DIRECT_INVOKE",
+                reason="Direct tool invocation is enabled - must be disabled",
+            )
+
+        if tool_exposure.get("public_endpoints", []):
+            raise ValidationFailure(
+                rule="STRUCTURAL.NO_BYPASS.TOOL_PUBLIC_ENDPOINT",
+                reason="Tools have public endpoints exposed",
+                details={
+                    "exposed_endpoints": tool_exposure.get("public_endpoints"),
+                },
+            )
+
+        # Validate network policies enforce isolation
+        self._validate_network_isolation(network_policies)
+
+        # Validate admission policies
+        self._validate_admission_policies(admission_policies)
+
+        # Check CI bypass detection result
+        if ci_bypass_check_result:
+            if ci_bypass_check_result.get("bypass_paths_detected", False):
+                raise ValidationFailure(
+                    rule="STRUCTURAL.NO_BYPASS.CI_BYPASS_DETECTED",
+                    reason="CI detected bypass paths in codebase",
+                    details={
+                        "bypass_paths": ci_bypass_check_result.get("paths", []),
+                        "scan_timestamp": ci_bypass_check_result.get("timestamp"),
+                    },
+                )
+
+            if not ci_bypass_check_result.get("scan_completed", False):
+                raise ValidationFailure(
+                    rule="STRUCTURAL.NO_BYPASS.CI_SCAN_INCOMPLETE",
+                    reason="CI bypass path scan did not complete",
+                )
+
+        logger.info("Structural no-bypass validation PASSED")
+
+    def _validate_network_isolation(self, network_policies: List[Dict]) -> None:
+        """Validate network policies enforce proper isolation."""
+        if not network_policies:
+            raise ValidationFailure(
+                rule="STRUCTURAL.NO_BYPASS.NO_NETWORK_POLICY",
+                reason="No network policies defined",
+            )
+
+        # Check for default-deny policy
+        has_default_deny = any(
+            policy.get("default_action") == "DENY"
+            for policy in network_policies
+        )
+        if not has_default_deny:
+            raise ValidationFailure(
+                rule="STRUCTURAL.NO_BYPASS.NO_DEFAULT_DENY",
+                reason="Network policies must include default-deny rule",
+            )
+
+        # Check tool namespace isolation
+        tool_namespace_policies = [
+            p for p in network_policies
+            if p.get("namespace") == "tools" or p.get("applies_to") == "tools"
+        ]
+
+        if not tool_namespace_policies:
+            raise ValidationFailure(
+                rule="STRUCTURAL.NO_BYPASS.TOOL_NAMESPACE_UNPROTECTED",
+                reason="No network policy protects tool namespace",
+            )
+
+        # Verify tools can only be reached via orchestrator
+        for policy in tool_namespace_policies:
+            allowed_sources = policy.get("allowed_sources", [])
+            non_orchestrator_sources = [
+                s for s in allowed_sources
+                if s.get("type") != "ORCHESTRATOR" and s.get("namespace") != "orchestrator"
+            ]
+            if non_orchestrator_sources:
+                raise ValidationFailure(
+                    rule="STRUCTURAL.NO_BYPASS.TOOL_NON_ORCHESTRATOR_ACCESS",
+                    reason="Tools accessible from non-orchestrator sources",
+                    details={
+                        "policy_id": policy.get("policy_id"),
+                        "violating_sources": non_orchestrator_sources,
+                    },
+                )
+
+    def _validate_admission_policies(self, admission_policies: List[Dict]) -> None:
+        """Validate admission policies prevent bypass."""
+        if not admission_policies:
+            raise ValidationFailure(
+                rule="STRUCTURAL.NO_BYPASS.NO_ADMISSION_POLICY",
+                reason="No admission policies defined",
+            )
+
+        # Check for required admission controllers
+        required_controllers = {
+            "tool_invocation_validator",
+            "orchestrator_origin_validator",
+            "permit_validator",
+        }
+
+        active_controllers = set()
+        for policy in admission_policies:
+            controller = policy.get("controller")
+            if controller and policy.get("enabled", False):
+                active_controllers.add(controller)
+
+        missing_controllers = required_controllers - active_controllers
+        if missing_controllers:
+            raise ValidationFailure(
+                rule="STRUCTURAL.NO_BYPASS.MISSING_ADMISSION_CONTROLLER",
+                reason="Required admission controllers not active",
+                details={
+                    "required": list(required_controllers),
+                    "active": list(active_controllers),
+                    "missing": list(missing_controllers),
+                },
+            )
+
+    # ========================================================================
+    # 10. UX INTEGRITY VALIDATION (MANDATORY)
+    # ========================================================================
+
+    def validate_ux_integrity(
+        self,
+        ux_components: Dict,
+        enforce_mode: bool = True,
+    ) -> None:
+        """
+        Validate UX integrity requirements.
+
+        MANDATORY checks (existence or enforcement of):
+        - Live Action Graph fed from ledger
+        - Replay Debugger with determinism diff
+        - Dossier Builder producing signed output
+        - Blast Radius Preview before execution
+
+        If missing or stubbed without enforcement:
+        Failure code: UX.INTEGRITY.FAILURE
+        """
+        logger.info("Validating UX integrity...")
+
+        required_components = {
+            "live_action_graph": {
+                "description": "Live Action Graph fed from ledger",
+                "required_features": ["ledger_feed", "real_time_updates"],
+            },
+            "replay_debugger": {
+                "description": "Replay Debugger with determinism diff",
+                "required_features": ["determinism_diff", "step_through"],
+            },
+            "dossier_builder": {
+                "description": "Dossier Builder producing signed output",
+                "required_features": ["signed_output", "integrity_verification"],
+            },
+            "blast_radius_preview": {
+                "description": "Blast Radius Preview before execution",
+                "required_features": ["pre_execution_display", "impact_estimation"],
+            },
+        }
+
+        missing_components = []
+        stub_only_components = []
+        incomplete_components = []
+
+        for component_id, requirements in required_components.items():
+            component = ux_components.get(component_id)
+
+            if not component:
+                missing_components.append({
+                    "id": component_id,
+                    "description": requirements["description"],
+                })
+                continue
+
+            # Check if component is a stub
+            if component.get("status") == "STUB":
+                if enforce_mode:
+                    stub_only_components.append({
+                        "id": component_id,
+                        "description": requirements["description"],
+                        "status": "STUB",
+                    })
+                continue
+
+            # Check if component is enabled
+            if not component.get("enabled", False):
+                missing_components.append({
+                    "id": component_id,
+                    "description": requirements["description"],
+                    "reason": "disabled",
+                })
+                continue
+
+            # Check required features
+            component_features = set(component.get("features", []))
+            required_features = set(requirements["required_features"])
+            missing_features = required_features - component_features
+
+            if missing_features:
+                incomplete_components.append({
+                    "id": component_id,
+                    "description": requirements["description"],
+                    "missing_features": list(missing_features),
+                })
+
+        # Report failures
+        if missing_components:
+            raise ValidationFailure(
+                rule="UX.INTEGRITY.COMPONENT_MISSING",
+                reason="Required UX components are missing",
+                details={
+                    "missing_components": missing_components,
+                },
+            )
+
+        if stub_only_components:
+            raise ValidationFailure(
+                rule="UX.INTEGRITY.STUB_NOT_ENFORCED",
+                reason="UX components are stubbed without enforcement",
+                details={
+                    "stub_components": stub_only_components,
+                },
+            )
+
+        if incomplete_components:
+            raise ValidationFailure(
+                rule="UX.INTEGRITY.INCOMPLETE_FEATURES",
+                reason="UX components missing required features",
+                details={
+                    "incomplete_components": incomplete_components,
+                },
+            )
+
+        # Validate component integrations
+        self._validate_ux_integrations(ux_components)
+
+        logger.info("UX integrity validation PASSED")
+
+    def _validate_ux_integrations(self, ux_components: Dict) -> None:
+        """Validate UX component integrations are properly configured."""
+        # Live Action Graph must be connected to ledger
+        action_graph = ux_components.get("live_action_graph", {})
+        if action_graph.get("enabled"):
+            ledger_connection = action_graph.get("ledger_connection", {})
+            if not ledger_connection.get("connected"):
+                raise ValidationFailure(
+                    rule="UX.INTEGRITY.ACTION_GRAPH_DISCONNECTED",
+                    reason="Live Action Graph is not connected to ledger",
+                )
+
+            if not ledger_connection.get("real_time"):
+                raise ValidationFailure(
+                    rule="UX.INTEGRITY.ACTION_GRAPH_NOT_REALTIME",
+                    reason="Live Action Graph ledger connection is not real-time",
+                )
+
+        # Replay Debugger must have access to replay data
+        replay_debugger = ux_components.get("replay_debugger", {})
+        if replay_debugger.get("enabled"):
+            if not replay_debugger.get("replay_data_access"):
+                raise ValidationFailure(
+                    rule="UX.INTEGRITY.REPLAY_NO_DATA_ACCESS",
+                    reason="Replay Debugger does not have replay data access",
+                )
+
+        # Dossier Builder must produce signed output
+        dossier_builder = ux_components.get("dossier_builder", {})
+        if dossier_builder.get("enabled"):
+            output_config = dossier_builder.get("output_config", {})
+            if not output_config.get("signing_enabled"):
+                raise ValidationFailure(
+                    rule="UX.INTEGRITY.DOSSIER_UNSIGNED",
+                    reason="Dossier Builder signing is not enabled",
+                )
+
+            if not output_config.get("signing_key_ref"):
+                raise ValidationFailure(
+                    rule="UX.INTEGRITY.DOSSIER_NO_SIGNING_KEY",
+                    reason="Dossier Builder has no signing key configured",
+                )
+
+        # Blast Radius Preview must be shown before execution
+        blast_preview = ux_components.get("blast_radius_preview", {})
+        if blast_preview.get("enabled"):
+            if not blast_preview.get("pre_execution_required"):
+                raise ValidationFailure(
+                    rule="UX.INTEGRITY.BLAST_PREVIEW_NOT_REQUIRED",
+                    reason="Blast Radius Preview is not required before execution",
+                )
+
 
 class RuntimeEnforcementGuard:
     """
@@ -1589,11 +2182,15 @@ class RuntimeEnforcementGuard:
         runtime_attestation: Dict,
     ) -> Dict:
         """Create dual attestation record."""
+        attestation_data = {
+            'control': control_plane_attestation,
+            'runtime': runtime_attestation,
+        }
+        attestation_hash = hashlib.sha256(
+            json.dumps(attestation_data, sort_keys=True).encode()
+        ).hexdigest()[:16]
         return {
-            "attestation_id": f"dual-{hashlib.sha256(json.dumps({
-                'control': control_plane_attestation,
-                'runtime': runtime_attestation,
-            }, sort_keys=True).encode()).hexdigest()[:16]}",
+            "attestation_id": f"dual-{attestation_hash}",
             "control_plane_attestation": control_plane_attestation,
             "runtime_guard_attestation": runtime_attestation,
             "combined_hash": self.validator._compute_hash({

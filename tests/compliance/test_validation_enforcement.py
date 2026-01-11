@@ -1005,3 +1005,681 @@ class TestEntrypointFeasibility:
         with pytest.raises(ValidationFailure) as exc:
             validator.validate_entrypoint_feasibility(campaign, entrypoints, {})
         assert exc.value.rule == "PREFLIGHT.ENTRYPOINT.DIVERSITY_REGION"
+
+
+# =============================================================================
+# SCOPE DRIFT DETECTION TESTS (Section 4.2)
+# =============================================================================
+
+class TestScopeDriftDetection:
+    """Tests for scope drift detection (Blueprint v6.1 Section 4.2)."""
+
+    def test_actions_within_scope_pass(self):
+        """Actions within approved scope should pass."""
+        validator = StrictValidator()
+
+        approved_scope = {
+            "assets": [
+                {"asset_id": "HOST-123456789"},
+                {"asset_id": "HOST-987654321"},
+            ],
+            "boundaries": {
+                "networks": [{"cidr": "10.0.0.0/8"}],
+                "domains": [{"domain": "example.com"}],
+            },
+        }
+
+        executed_actions = [
+            {"action_id": "act-1", "target_id": "HOST-123456789"},
+            {"action_id": "act-2", "target_id": "HOST-987654321"},
+            {"action_id": "act-3", "target_network": "10.1.2.3"},
+            {"action_id": "act-4", "target_domain": "sub.example.com"},
+        ]
+
+        # Should not raise
+        validator.validate_scope_drift(executed_actions, approved_scope)
+
+    def test_minor_drift_p1_alert_only(self):
+        """Minor drift (P1) should alert but not fail."""
+        validator = StrictValidator()
+
+        approved_scope = {
+            "assets": [{"asset_id": "HOST-123456789"}],
+            "boundaries": {
+                "networks": [{"cidr": "10.0.0.0/8"}],
+                "domains": [],
+            },
+        }
+
+        # 1 out of 20 actions outside scope = 5% drift (P1)
+        executed_actions = [
+            {"action_id": f"act-{i}", "target_id": "HOST-123456789"}
+            for i in range(19)
+        ]
+        executed_actions.append(
+            {"action_id": "act-drift", "target_id": "HOST-UNAUTHORIZED"}
+        )
+
+        # Should not raise for P1 (5% < 7.5% threshold for P1)
+        validator.validate_scope_drift(executed_actions, approved_scope, drift_threshold=0.15)
+
+    def test_significant_drift_p2_fails(self):
+        """Significant drift (P2+) should fail with HALT_AND_REVOKE."""
+        validator = StrictValidator()
+
+        approved_scope = {
+            "assets": [{"asset_id": "HOST-123456789"}],
+            "boundaries": {
+                "networks": [{"cidr": "10.0.0.0/8"}],
+                "domains": [],
+            },
+        }
+
+        # 3 out of 10 actions outside scope = 30% drift (P3)
+        executed_actions = [
+            {"action_id": f"act-{i}", "target_id": "HOST-123456789"}
+            for i in range(7)
+        ]
+        for i in range(3):
+            executed_actions.append(
+                {"action_id": f"act-drift-{i}", "target_id": f"HOST-UNAUTHORIZED-{i}"}
+            )
+
+        with pytest.raises(ValidationFailure) as exc:
+            validator.validate_scope_drift(executed_actions, approved_scope, drift_threshold=0.15)
+
+        assert exc.value.rule == "RUNTIME.SCOPE.DRIFT"
+        assert "HALT_AND_REVOKE" in str(exc.value.details.get("action_required"))
+
+    def test_network_drift_detection(self):
+        """Network-based drift should be detected."""
+        validator = StrictValidator()
+
+        approved_scope = {
+            "assets": [],
+            "boundaries": {
+                "networks": [{"cidr": "10.0.0.0/8"}],
+                "domains": [],
+            },
+        }
+
+        # Actions targeting networks outside approved CIDR
+        executed_actions = [
+            {"action_id": "act-1", "target_network": "192.168.1.1"},  # Outside 10.0.0.0/8
+            {"action_id": "act-2", "target_network": "192.168.1.2"},
+        ]
+
+        with pytest.raises(ValidationFailure) as exc:
+            validator.validate_scope_drift(executed_actions, approved_scope)
+
+        assert exc.value.rule == "RUNTIME.SCOPE.DRIFT"
+
+    def test_domain_drift_detection(self):
+        """Domain-based drift should be detected."""
+        validator = StrictValidator()
+
+        approved_scope = {
+            "assets": [],
+            "boundaries": {
+                "networks": [],
+                "domains": [{"domain": "example.com"}],
+            },
+        }
+
+        # Actions targeting domains outside approved scope
+        executed_actions = [
+            {"action_id": "act-1", "target_domain": "malicious.org"},
+            {"action_id": "act-2", "target_domain": "evil.net"},
+        ]
+
+        with pytest.raises(ValidationFailure) as exc:
+            validator.validate_scope_drift(executed_actions, approved_scope)
+
+        assert exc.value.rule == "RUNTIME.SCOPE.DRIFT"
+
+    def test_subdomain_in_scope(self):
+        """Subdomains of approved domains should be in scope."""
+        validator = StrictValidator()
+
+        approved_scope = {
+            "assets": [],
+            "boundaries": {
+                "networks": [],
+                "domains": [{"domain": "example.com"}],
+            },
+        }
+
+        executed_actions = [
+            {"action_id": "act-1", "target_domain": "sub.example.com"},
+            {"action_id": "act-2", "target_domain": "deep.sub.example.com"},
+        ]
+
+        # Should not raise - subdomains are in scope
+        validator.validate_scope_drift(executed_actions, approved_scope)
+
+
+# =============================================================================
+# COST CONTROLLER ENFORCEMENT TESTS (Section 4.5)
+# =============================================================================
+
+class TestCostControllerEnforcement:
+    """Tests for cost controller enforcement (Blueprint v6.1 Section 4.5)."""
+
+    def test_within_budget_passes(self):
+        """Actions within budget should pass."""
+        validator = StrictValidator()
+
+        result = validator.validate_cost_controller(
+            campaign_id="camp-001",
+            current_cost=50.0,
+            budget_limit=1000.0,
+            action_cost_delta=10.0,
+        )
+
+        assert result["status"] == "OK"
+        assert result["throttle_applied"] is False
+        assert result["projected_cost"] == 60.0
+
+    def test_soft_threshold_triggers_throttle(self):
+        """Crossing 90% threshold should trigger throttle."""
+        validator = StrictValidator()
+
+        result = validator.validate_cost_controller(
+            campaign_id="camp-001",
+            current_cost=890.0,
+            budget_limit=1000.0,
+            action_cost_delta=20.0,  # 910/1000 = 91%
+        )
+
+        assert result["status"] == "THROTTLED"
+        assert result["throttle_applied"] is True
+        assert result["utilization"] == 0.91
+
+    def test_hard_threshold_fails(self):
+        """Exceeding 100% budget should fail with HARD_STOP."""
+        validator = StrictValidator()
+
+        with pytest.raises(ValidationFailure) as exc:
+            validator.validate_cost_controller(
+                campaign_id="camp-001",
+                current_cost=950.0,
+                budget_limit=1000.0,
+                action_cost_delta=100.0,  # 1050/1000 = 105%
+            )
+
+        assert exc.value.rule == "RUNTIME.BUDGET.EXCEEDED"
+        assert "HARD_STOP" in str(exc.value.details.get("action_required"))
+
+    def test_exactly_at_budget_fails(self):
+        """Exactly at 100% budget should fail."""
+        validator = StrictValidator()
+
+        with pytest.raises(ValidationFailure) as exc:
+            validator.validate_cost_controller(
+                campaign_id="camp-001",
+                current_cost=990.0,
+                budget_limit=1000.0,
+                action_cost_delta=10.0,  # 1000/1000 = 100%
+            )
+
+        assert exc.value.rule == "RUNTIME.BUDGET.EXCEEDED"
+
+    def test_invalid_budget_limit_fails(self):
+        """Invalid (zero or negative) budget should fail."""
+        validator = StrictValidator()
+
+        with pytest.raises(ValidationFailure) as exc:
+            validator.validate_cost_controller(
+                campaign_id="camp-001",
+                current_cost=0,
+                budget_limit=0,
+                action_cost_delta=10.0,
+            )
+
+        assert exc.value.rule == "RUNTIME.BUDGET.INVALID_LIMIT"
+
+    def test_cost_delta_recorded(self):
+        """Cost delta should be recorded in result."""
+        validator = StrictValidator()
+
+        result = validator.validate_cost_controller(
+            campaign_id="camp-001",
+            current_cost=100.0,
+            budget_limit=1000.0,
+            action_cost_delta=25.50,
+        )
+
+        assert result["action_cost_delta"] == 25.50
+        assert result["current_cost"] == 100.0
+        assert result["projected_cost"] == 125.50
+
+
+# =============================================================================
+# STRUCTURAL NO-BYPASS ENFORCEMENT TESTS (Section 5)
+# =============================================================================
+
+class TestStructuralNoBypassEnforcement:
+    """Tests for structural no-bypass enforcement (Blueprint v6.1 Section 5)."""
+
+    def create_valid_system_config(self):
+        """Create valid system configuration."""
+        return {
+            "execution_entrypoints": [
+                {"id": "orchestrator-main", "type": "ORCHESTRATOR"},
+            ],
+            "tool_exposure": {
+                "direct_invocation_enabled": False,
+                "public_endpoints": [],
+            },
+        }
+
+    def create_valid_network_policies(self):
+        """Create valid network policies."""
+        return [
+            {
+                "policy_id": "default-deny",
+                "default_action": "DENY",
+            },
+            {
+                "policy_id": "tool-isolation",
+                "namespace": "tools",
+                "allowed_sources": [
+                    {"type": "ORCHESTRATOR", "namespace": "orchestrator"},
+                ],
+            },
+        ]
+
+    def create_valid_admission_policies(self):
+        """Create valid admission policies."""
+        return [
+            {"controller": "tool_invocation_validator", "enabled": True},
+            {"controller": "orchestrator_origin_validator", "enabled": True},
+            {"controller": "permit_validator", "enabled": True},
+        ]
+
+    def test_valid_configuration_passes(self):
+        """Valid no-bypass configuration should pass."""
+        validator = StrictValidator()
+
+        validator.validate_structural_no_bypass(
+            system_config=self.create_valid_system_config(),
+            network_policies=self.create_valid_network_policies(),
+            admission_policies=self.create_valid_admission_policies(),
+        )
+
+    def test_no_execution_entrypoint_fails(self):
+        """Missing execution entrypoints should fail."""
+        validator = StrictValidator()
+
+        config = self.create_valid_system_config()
+        config["execution_entrypoints"] = []
+
+        with pytest.raises(ValidationFailure) as exc:
+            validator.validate_structural_no_bypass(
+                system_config=config,
+                network_policies=self.create_valid_network_policies(),
+                admission_policies=self.create_valid_admission_policies(),
+            )
+
+        assert exc.value.rule == "STRUCTURAL.NO_BYPASS.NO_ENTRYPOINT"
+
+    def test_direct_tool_access_fails(self):
+        """Non-orchestrator execution entrypoints should fail."""
+        validator = StrictValidator()
+
+        config = self.create_valid_system_config()
+        config["execution_entrypoints"].append(
+            {"id": "direct-tool-api", "type": "DIRECT_API"}
+        )
+
+        with pytest.raises(ValidationFailure) as exc:
+            validator.validate_structural_no_bypass(
+                system_config=config,
+                network_policies=self.create_valid_network_policies(),
+                admission_policies=self.create_valid_admission_policies(),
+            )
+
+        assert exc.value.rule == "STRUCTURAL.NO_BYPASS.DIRECT_TOOL_ACCESS"
+
+    def test_direct_invocation_enabled_fails(self):
+        """Direct tool invocation enabled should fail."""
+        validator = StrictValidator()
+
+        config = self.create_valid_system_config()
+        config["tool_exposure"]["direct_invocation_enabled"] = True
+
+        with pytest.raises(ValidationFailure) as exc:
+            validator.validate_structural_no_bypass(
+                system_config=config,
+                network_policies=self.create_valid_network_policies(),
+                admission_policies=self.create_valid_admission_policies(),
+            )
+
+        assert exc.value.rule == "STRUCTURAL.NO_BYPASS.TOOL_DIRECT_INVOKE"
+
+    def test_public_tool_endpoints_fails(self):
+        """Public tool endpoints should fail."""
+        validator = StrictValidator()
+
+        config = self.create_valid_system_config()
+        config["tool_exposure"]["public_endpoints"] = ["/api/tools/exec"]
+
+        with pytest.raises(ValidationFailure) as exc:
+            validator.validate_structural_no_bypass(
+                system_config=config,
+                network_policies=self.create_valid_network_policies(),
+                admission_policies=self.create_valid_admission_policies(),
+            )
+
+        assert exc.value.rule == "STRUCTURAL.NO_BYPASS.TOOL_PUBLIC_ENDPOINT"
+
+    def test_no_network_policy_fails(self):
+        """Missing network policies should fail."""
+        validator = StrictValidator()
+
+        with pytest.raises(ValidationFailure) as exc:
+            validator.validate_structural_no_bypass(
+                system_config=self.create_valid_system_config(),
+                network_policies=[],
+                admission_policies=self.create_valid_admission_policies(),
+            )
+
+        assert exc.value.rule == "STRUCTURAL.NO_BYPASS.NO_NETWORK_POLICY"
+
+    def test_no_default_deny_fails(self):
+        """Missing default-deny network policy should fail."""
+        validator = StrictValidator()
+
+        policies = [
+            {"policy_id": "allow-all", "default_action": "ALLOW"},
+            {"policy_id": "tool-isolation", "namespace": "tools", "allowed_sources": []},
+        ]
+
+        with pytest.raises(ValidationFailure) as exc:
+            validator.validate_structural_no_bypass(
+                system_config=self.create_valid_system_config(),
+                network_policies=policies,
+                admission_policies=self.create_valid_admission_policies(),
+            )
+
+        assert exc.value.rule == "STRUCTURAL.NO_BYPASS.NO_DEFAULT_DENY"
+
+    def test_tool_namespace_unprotected_fails(self):
+        """Unprotected tool namespace should fail."""
+        validator = StrictValidator()
+
+        policies = [
+            {"policy_id": "default-deny", "default_action": "DENY"},
+            # Missing tool namespace policy
+        ]
+
+        with pytest.raises(ValidationFailure) as exc:
+            validator.validate_structural_no_bypass(
+                system_config=self.create_valid_system_config(),
+                network_policies=policies,
+                admission_policies=self.create_valid_admission_policies(),
+            )
+
+        assert exc.value.rule == "STRUCTURAL.NO_BYPASS.TOOL_NAMESPACE_UNPROTECTED"
+
+    def test_non_orchestrator_tool_access_fails(self):
+        """Tools accessible from non-orchestrator sources should fail."""
+        validator = StrictValidator()
+
+        policies = [
+            {"policy_id": "default-deny", "default_action": "DENY"},
+            {
+                "policy_id": "tool-isolation",
+                "namespace": "tools",
+                "allowed_sources": [
+                    {"type": "ORCHESTRATOR"},
+                    {"type": "EXTERNAL_API"},  # Violation!
+                ],
+            },
+        ]
+
+        with pytest.raises(ValidationFailure) as exc:
+            validator.validate_structural_no_bypass(
+                system_config=self.create_valid_system_config(),
+                network_policies=policies,
+                admission_policies=self.create_valid_admission_policies(),
+            )
+
+        assert exc.value.rule == "STRUCTURAL.NO_BYPASS.TOOL_NON_ORCHESTRATOR_ACCESS"
+
+    def test_missing_admission_controller_fails(self):
+        """Missing required admission controllers should fail."""
+        validator = StrictValidator()
+
+        # Missing permit_validator
+        admission_policies = [
+            {"controller": "tool_invocation_validator", "enabled": True},
+            {"controller": "orchestrator_origin_validator", "enabled": True},
+        ]
+
+        with pytest.raises(ValidationFailure) as exc:
+            validator.validate_structural_no_bypass(
+                system_config=self.create_valid_system_config(),
+                network_policies=self.create_valid_network_policies(),
+                admission_policies=admission_policies,
+            )
+
+        assert exc.value.rule == "STRUCTURAL.NO_BYPASS.MISSING_ADMISSION_CONTROLLER"
+
+    def test_ci_bypass_detected_fails(self):
+        """CI-detected bypass paths should fail."""
+        validator = StrictValidator()
+
+        ci_result = {
+            "scan_completed": True,
+            "bypass_paths_detected": True,
+            "paths": ["/src/tools/direct_exec.py"],
+            "timestamp": "2024-01-01T00:00:00Z",
+        }
+
+        with pytest.raises(ValidationFailure) as exc:
+            validator.validate_structural_no_bypass(
+                system_config=self.create_valid_system_config(),
+                network_policies=self.create_valid_network_policies(),
+                admission_policies=self.create_valid_admission_policies(),
+                ci_bypass_check_result=ci_result,
+            )
+
+        assert exc.value.rule == "STRUCTURAL.NO_BYPASS.CI_BYPASS_DETECTED"
+
+    def test_ci_scan_incomplete_fails(self):
+        """Incomplete CI scan should fail."""
+        validator = StrictValidator()
+
+        ci_result = {
+            "scan_completed": False,
+            "bypass_paths_detected": False,
+        }
+
+        with pytest.raises(ValidationFailure) as exc:
+            validator.validate_structural_no_bypass(
+                system_config=self.create_valid_system_config(),
+                network_policies=self.create_valid_network_policies(),
+                admission_policies=self.create_valid_admission_policies(),
+                ci_bypass_check_result=ci_result,
+            )
+
+        assert exc.value.rule == "STRUCTURAL.NO_BYPASS.CI_SCAN_INCOMPLETE"
+
+
+# =============================================================================
+# UX INTEGRITY VALIDATION TESTS (Section 10)
+# =============================================================================
+
+class TestUXIntegrityValidation:
+    """Tests for UX integrity validation (Blueprint v6.1 Section 10)."""
+
+    def create_valid_ux_components(self):
+        """Create valid UX components configuration."""
+        return {
+            "live_action_graph": {
+                "enabled": True,
+                "status": "ACTIVE",
+                "features": ["ledger_feed", "real_time_updates"],
+                "ledger_connection": {
+                    "connected": True,
+                    "real_time": True,
+                },
+            },
+            "replay_debugger": {
+                "enabled": True,
+                "status": "ACTIVE",
+                "features": ["determinism_diff", "step_through"],
+                "replay_data_access": True,
+            },
+            "dossier_builder": {
+                "enabled": True,
+                "status": "ACTIVE",
+                "features": ["signed_output", "integrity_verification"],
+                "output_config": {
+                    "signing_enabled": True,
+                    "signing_key_ref": "key-dossier-signer",
+                },
+            },
+            "blast_radius_preview": {
+                "enabled": True,
+                "status": "ACTIVE",
+                "features": ["pre_execution_display", "impact_estimation"],
+                "pre_execution_required": True,
+            },
+        }
+
+    def test_valid_ux_components_pass(self):
+        """Valid UX components should pass."""
+        validator = StrictValidator()
+        validator.validate_ux_integrity(self.create_valid_ux_components())
+
+    def test_missing_component_fails(self):
+        """Missing UX component should fail."""
+        validator = StrictValidator()
+
+        components = self.create_valid_ux_components()
+        del components["live_action_graph"]
+
+        with pytest.raises(ValidationFailure) as exc:
+            validator.validate_ux_integrity(components)
+
+        assert exc.value.rule == "UX.INTEGRITY.COMPONENT_MISSING"
+
+    def test_disabled_component_fails(self):
+        """Disabled UX component should fail."""
+        validator = StrictValidator()
+
+        components = self.create_valid_ux_components()
+        components["replay_debugger"]["enabled"] = False
+
+        with pytest.raises(ValidationFailure) as exc:
+            validator.validate_ux_integrity(components)
+
+        assert exc.value.rule == "UX.INTEGRITY.COMPONENT_MISSING"
+
+    def test_stub_component_fails_in_enforce_mode(self):
+        """Stubbed component should fail in enforce mode."""
+        validator = StrictValidator()
+
+        components = self.create_valid_ux_components()
+        components["dossier_builder"]["status"] = "STUB"
+
+        with pytest.raises(ValidationFailure) as exc:
+            validator.validate_ux_integrity(components, enforce_mode=True)
+
+        assert exc.value.rule == "UX.INTEGRITY.STUB_NOT_ENFORCED"
+
+    def test_stub_component_passes_without_enforce_mode(self):
+        """Stubbed component should pass when enforce_mode=False."""
+        validator = StrictValidator()
+
+        components = self.create_valid_ux_components()
+        components["dossier_builder"]["status"] = "STUB"
+
+        # Should not raise with enforce_mode=False
+        validator.validate_ux_integrity(components, enforce_mode=False)
+
+    def test_missing_features_fails(self):
+        """Component with missing features should fail."""
+        validator = StrictValidator()
+
+        components = self.create_valid_ux_components()
+        components["replay_debugger"]["features"] = ["step_through"]  # Missing determinism_diff
+
+        with pytest.raises(ValidationFailure) as exc:
+            validator.validate_ux_integrity(components)
+
+        assert exc.value.rule == "UX.INTEGRITY.INCOMPLETE_FEATURES"
+
+    def test_action_graph_disconnected_fails(self):
+        """Disconnected Live Action Graph should fail."""
+        validator = StrictValidator()
+
+        components = self.create_valid_ux_components()
+        components["live_action_graph"]["ledger_connection"]["connected"] = False
+
+        with pytest.raises(ValidationFailure) as exc:
+            validator.validate_ux_integrity(components)
+
+        assert exc.value.rule == "UX.INTEGRITY.ACTION_GRAPH_DISCONNECTED"
+
+    def test_action_graph_not_realtime_fails(self):
+        """Non-realtime Live Action Graph should fail."""
+        validator = StrictValidator()
+
+        components = self.create_valid_ux_components()
+        components["live_action_graph"]["ledger_connection"]["real_time"] = False
+
+        with pytest.raises(ValidationFailure) as exc:
+            validator.validate_ux_integrity(components)
+
+        assert exc.value.rule == "UX.INTEGRITY.ACTION_GRAPH_NOT_REALTIME"
+
+    def test_replay_debugger_no_data_access_fails(self):
+        """Replay Debugger without data access should fail."""
+        validator = StrictValidator()
+
+        components = self.create_valid_ux_components()
+        components["replay_debugger"]["replay_data_access"] = False
+
+        with pytest.raises(ValidationFailure) as exc:
+            validator.validate_ux_integrity(components)
+
+        assert exc.value.rule == "UX.INTEGRITY.REPLAY_NO_DATA_ACCESS"
+
+    def test_dossier_unsigned_fails(self):
+        """Dossier Builder without signing should fail."""
+        validator = StrictValidator()
+
+        components = self.create_valid_ux_components()
+        components["dossier_builder"]["output_config"]["signing_enabled"] = False
+
+        with pytest.raises(ValidationFailure) as exc:
+            validator.validate_ux_integrity(components)
+
+        assert exc.value.rule == "UX.INTEGRITY.DOSSIER_UNSIGNED"
+
+    def test_dossier_no_signing_key_fails(self):
+        """Dossier Builder without signing key should fail."""
+        validator = StrictValidator()
+
+        components = self.create_valid_ux_components()
+        del components["dossier_builder"]["output_config"]["signing_key_ref"]
+
+        with pytest.raises(ValidationFailure) as exc:
+            validator.validate_ux_integrity(components)
+
+        assert exc.value.rule == "UX.INTEGRITY.DOSSIER_NO_SIGNING_KEY"
+
+    def test_blast_preview_not_required_fails(self):
+        """Blast Radius Preview not required should fail."""
+        validator = StrictValidator()
+
+        components = self.create_valid_ux_components()
+        components["blast_radius_preview"]["pre_execution_required"] = False
+
+        with pytest.raises(ValidationFailure) as exc:
+            validator.validate_ux_integrity(components)
+
+        assert exc.value.rule == "UX.INTEGRITY.BLAST_PREVIEW_NOT_REQUIRED"
