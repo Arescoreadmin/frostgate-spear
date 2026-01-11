@@ -464,3 +464,315 @@ class ProvenanceValidationError(FrostGateError):
         self.artifact_id = artifact_id
         self.slsa_level = slsa_level
         self.required_level = required_level
+
+
+# ============================================================================
+# Execution Control Plane Errors (v6.1 - Gate F Enforcement)
+# ============================================================================
+
+
+class PermitDeniedError(FrostGateError):
+    """
+    Raised when permit validation fails.
+
+    The action cannot proceed because the permit is invalid, missing,
+    or does not authorize the requested action.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        permit_id: Optional[str] = None,
+        reason: Optional[str] = None,
+        issues: Optional[List[Dict[str, Any]]] = None,
+    ):
+        super().__init__(
+            message,
+            code="PERMIT.DENIED",
+            details={
+                "permit_id": permit_id,
+                "reason": reason,
+                "issues": issues or [],
+            },
+        )
+        self.permit_id = permit_id
+        self.reason = reason
+        self.issues = issues or []
+
+
+class PermitExpiredError(FrostGateError):
+    """
+    Raised when permit TTL has expired.
+
+    This can occur at preflight OR mid-execution when TTL expires
+    between actions. Execution MUST halt immediately.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        permit_id: Optional[str] = None,
+        expired_at: Optional[str] = None,
+        action_id: Optional[str] = None,
+    ):
+        super().__init__(
+            message,
+            code="PERMIT.EXPIRED",
+            details={
+                "permit_id": permit_id,
+                "expired_at": expired_at,
+                "action_id": action_id,
+            },
+        )
+        self.permit_id = permit_id
+        self.expired_at = expired_at
+        self.action_id = action_id
+
+
+class PolicyDeniedError(FrostGateError):
+    """
+    Raised when OPA policy evaluation denies the action.
+
+    Includes ABAC policy violations.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        policy_path: Optional[str] = None,
+        decision: Optional[str] = None,
+        violations: Optional[List[str]] = None,
+    ):
+        super().__init__(
+            message,
+            code="POLICY.DENIED",
+            details={
+                "policy_path": policy_path,
+                "decision": decision,
+                "violations": violations or [],
+            },
+        )
+        self.policy_path = policy_path
+        self.decision = decision
+        self.violations = violations or []
+
+
+class ScopeDriftError(FrostGateError):
+    """
+    Raised when scope drift exceeds P2+ threshold.
+
+    P2+ drift MUST halt execution and revoke permit.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        drift_score: float,
+        severity: str,
+        out_of_scope_actions: Optional[List[str]] = None,
+    ):
+        super().__init__(
+            message,
+            code="RUNTIME.SCOPE.DRIFT",
+            details={
+                "drift_score": drift_score,
+                "severity": severity,
+                "out_of_scope_actions": out_of_scope_actions or [],
+                "action_required": "HALT_AND_REVOKE",
+            },
+        )
+        self.drift_score = drift_score
+        self.severity = severity
+        self.out_of_scope_actions = out_of_scope_actions or []
+
+
+class StepUpRequiredError(FrostGateError):
+    """
+    Raised when step-up authentication is required.
+
+    The action cannot proceed without additional authentication
+    (hardware token, biometric, dual approval).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        action_id: Optional[str] = None,
+        required_method: Optional[str] = None,
+        reason: Optional[str] = None,
+    ):
+        super().__init__(
+            message,
+            code="ABAC.STEPUP.REQUIRED",
+            details={
+                "action_id": action_id,
+                "required_method": required_method,
+                "reason": reason,
+            },
+        )
+        self.action_id = action_id
+        self.required_method = required_method
+        self.reason = reason
+
+
+class RateLimitedError(FrostGateError):
+    """
+    Raised when rate limit is exceeded.
+
+    Execution MUST block until rate limit resets.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        target_id: Optional[str] = None,
+        current_rate: int = 0,
+        max_rate: int = 0,
+        window_seconds: int = 60,
+    ):
+        super().__init__(
+            message,
+            code="RUNTIME.RATE.EXCEEDED",
+            details={
+                "target_id": target_id,
+                "current_rate": current_rate,
+                "max_rate": max_rate,
+                "window_seconds": window_seconds,
+            },
+        )
+        self.target_id = target_id
+        self.current_rate = current_rate
+        self.max_rate = max_rate
+        self.window_seconds = window_seconds
+
+
+class TargetUnsafeError(FrostGateError):
+    """
+    Raised when target safety envelope is violated.
+
+    This includes health probe failures, stop conditions,
+    and fingerprint mismatches.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        target_id: Optional[str] = None,
+        stop_condition: Optional[str] = None,
+        health_state: Optional[str] = None,
+    ):
+        super().__init__(
+            message,
+            code="TARGET.UNSAFE",
+            details={
+                "target_id": target_id,
+                "stop_condition": stop_condition,
+                "health_state": health_state,
+            },
+        )
+        self.target_id = target_id
+        self.stop_condition = stop_condition
+        self.health_state = health_state
+
+
+class WitnessRequiredError(FrostGateError):
+    """
+    Raised when dual attestation requires witness but none is available.
+
+    For modes requiring dual attestation (CANARY, SHADOW, LIVE_*),
+    execution MUST halt if witness is unavailable.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        action_id: Optional[str] = None,
+        mode: Optional[str] = None,
+    ):
+        super().__init__(
+            message,
+            code="RUNTIME.WITNESS.REQUIRED",
+            details={
+                "action_id": action_id,
+                "mode": mode,
+            },
+        )
+        self.action_id = action_id
+        self.mode = mode
+
+
+class GuardBypassError(FrostGateError):
+    """
+    CRITICAL: Raised when execution bypasses the guard chain.
+
+    This is a SECURITY FAILURE. If an action executes without
+    passing through validate_and_execute_action(), this error
+    MUST be raised and the action MUST NOT execute.
+
+    Any detection of bypass paths in CI MUST fail the build.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        bypass_path: Optional[str] = None,
+        caller: Optional[str] = None,
+    ):
+        super().__init__(
+            message,
+            code="STRUCTURAL.NO_BYPASS.VIOLATION",
+            details={
+                "bypass_path": bypass_path,
+                "caller": caller,
+                "severity": "CRITICAL",
+            },
+        )
+        self.bypass_path = bypass_path
+        self.caller = caller
+
+
+class SoDViolationError(FrostGateError):
+    """
+    Raised when Separation of Duties is violated.
+
+    Executor MUST NOT be an approver for risk tier 2+ in LIVE modes.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        executor_id: Optional[str] = None,
+        conflicting_role: Optional[str] = None,
+    ):
+        super().__init__(
+            message,
+            code="ABAC.SOD.VIOLATION",
+            details={
+                "executor_id": executor_id,
+                "conflicting_role": conflicting_role,
+            },
+        )
+        self.executor_id = executor_id
+        self.conflicting_role = conflicting_role
+
+
+class DecisionRecordMissingError(FrostGateError):
+    """
+    Raised when an action attempts to execute without a DecisionRecord.
+
+    If DecisionRecord does not exist, execution is considered INVALID.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        action_id: Optional[str] = None,
+    ):
+        super().__init__(
+            message,
+            code="EXECUTION.DECISION_RECORD.MISSING",
+            details={
+                "action_id": action_id,
+            },
+        )
+        self.action_id = action_id
