@@ -1,0 +1,24 @@
+{
+  "version": "1.0.0",
+  "description": "Frost Gate Spear Trust Store - Ed25519 public keys for signature verification",
+  "trusted_keys": [
+    {
+      "key_id": "opa-bundle-signer-001",
+      "description": "OPA policy bundle signing key for Gate M",
+      "public_key": "qW96u/iDng2xJWqbdbkoRBhI8vdtfWH9WwJn/hhyxd4=",
+      "roles": ["bundle_signer"],
+      "valid_from": "2024-01-01T00:00:00Z",
+      "valid_to": "2030-12-31T23:59:59Z",
+      "revoked": false
+    },
+    {
+      "key_id": "permit-signer-001",
+      "description": "Execution permit signing key",
+      "public_key": "qW96u/iDng2xJWqbdbkoRBhI8vdtfWH9WwJn/hhyxd4=",
+      "roles": ["permit_signer"],
+      "valid_from": "2024-01-01T00:00:00Z",
+      "valid_to": "2030-12-31T23:59:59Z",
+      "revoked": false
+    }
+  ]
+}
