@@ -4,6 +4,10 @@ Frost Gate Spear - ROE Engine
 Rules of Engagement enforcement subsystem.
 Validates and enforces ROE constraints on all operations.
 Integrates with OPA for policy evaluation.
+
+Gate M: OPA Bundle Signing
+- Verifies bundle signature BEFORE loading policies
+- FAIL CLOSED: If verification fails, policies MUST NOT load
 """
 
 import asyncio
@@ -19,6 +23,10 @@ import aiohttp
 
 from ..core.config import Config
 from ..core.exceptions import ROEViolationError
+from ..policy.bundle_verify import (
+    PolicyBundleVerificationError,
+    PolicyBundleVerifier,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -246,6 +254,10 @@ class ROEEngine:
     - Alert footprint caps
     - Blast radius limits
     - Lateral movement authorization
+
+    Gate M: OPA Bundle Signing
+    - Verifies policy bundle signature BEFORE loading
+    - FAIL CLOSED: If verification fails, engine MUST NOT start
     """
 
     def __init__(self, config: Config):
@@ -254,13 +266,90 @@ class ROEEngine:
         self._opa_client = None
         self._roe_cache: Dict[str, Dict] = {}
         self._violation_log: List[Dict] = []
+        self._bundle_verified = False
+        self._bundle_verification_result = None
 
     async def start(self) -> None:
-        """Start the ROE Engine."""
+        """
+        Start the ROE Engine.
+
+        Gate M: Verifies policy bundle BEFORE loading OPA.
+        FAIL CLOSED: If verification fails, raises PolicyBundleVerificationError.
+        """
         logger.info("Starting ROE Engine...")
+
+        # Gate M: Verify OPA policy bundle before loading
+        await self._verify_policy_bundle()
+
         # Initialize OPA client for policy evaluation
         await self._initialize_opa()
         logger.info("ROE Engine started")
+
+    async def _verify_policy_bundle(self) -> None:
+        """
+        Gate M: Verify OPA policy bundle signature.
+
+        FAIL CLOSED: If verification fails, the engine MUST NOT load policies.
+
+        Raises:
+            PolicyBundleVerificationError: If bundle verification fails.
+        """
+        # Check if bundle verification is enabled
+        bundle_verification_enabled = getattr(
+            self.config.policy, "bundle_verification_enabled", True
+        )
+
+        if not bundle_verification_enabled:
+            logger.warning(
+                "SECURITY WARNING: OPA bundle verification is DISABLED. "
+                "This is only acceptable in development/test environments."
+            )
+            self._bundle_verified = False
+            return
+
+        # Resolve paths
+        base_path = Path(self.config.base_path)
+        trust_store_path = base_path / getattr(
+            self.config.policy, "trust_store_path", "integrity/trust_store.json"
+        )
+        bundle_path = base_path / getattr(
+            self.config.policy, "bundle_path", "build/opa_bundle.tar.gz"
+        )
+        sig_path = base_path / getattr(
+            self.config.policy, "bundle_sig_path", "build/opa_bundle.tar.gz.sig"
+        )
+        manifest_path = base_path / getattr(
+            self.config.policy, "bundle_manifest_path", "build/opa_bundle.manifest.json"
+        )
+
+        logger.info(f"Gate M: Verifying OPA policy bundle at {bundle_path}")
+
+        try:
+            verifier = PolicyBundleVerifier(
+                trust_store_path=trust_store_path,
+                bundle_dir=base_path / "build",
+            )
+            verifier.load_trust_store()
+
+            result = verifier.verify_bundle(
+                bundle_path=bundle_path,
+                sig_path=sig_path,
+                manifest_path=manifest_path,
+            )
+
+            self._bundle_verified = result.verified
+            self._bundle_verification_result = result
+
+            logger.info(
+                f"Gate M: Bundle verified successfully - "
+                f"hash={result.bundle_hash}, key={result.key_id}, "
+                f"signed_at={result.signed_at}"
+            )
+
+        except PolicyBundleVerificationError as e:
+            logger.error(f"Gate M FAILURE: Bundle verification failed - {e}")
+            # FAIL CLOSED: Re-raise to prevent engine startup
+            raise
 
     async def stop(self) -> None:
         """Stop the ROE Engine."""

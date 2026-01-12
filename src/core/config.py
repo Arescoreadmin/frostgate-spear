@@ -37,6 +37,12 @@ class PolicyConfig:
     safety_policy_path: str = "policy/safety_constraints.rego"
     mls_policy_path: str = "policy/mls_policy.rego"
     envelope_schema_path: str = "policy/policy_envelope.schema.json"
+    # Gate M: OPA Bundle Signing
+    bundle_verification_enabled: bool = True
+    bundle_path: str = "build/opa_bundle.tar.gz"
+    bundle_sig_path: str = "build/opa_bundle.tar.gz.sig"
+    bundle_manifest_path: str = "build/opa_bundle.manifest.json"
+    trust_store_path: str = "integrity/trust_store.json"
 
 
 @dataclass

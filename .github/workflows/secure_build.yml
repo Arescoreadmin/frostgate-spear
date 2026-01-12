@@ -1352,67 +1352,186 @@ jobs:
           cat gate-f-summary.json
 
   # ==========================================================================
-  # Gate M: OPA Bundle Signing (Blueprint v6.1) - BLOCKING STUB
+  # Gate M: OPA Bundle Signing (Blueprint v6.1)
   # ==========================================================================
   gate-m-opa-bundle-signing:
-    name: Gate M - OPA Bundle Signing (BLOCKING)
+    name: Gate M - OPA Bundle Signing
     runs-on: ubuntu-latest
     needs: [policy-validation]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
       - name: Setup OPA
         uses: open-policy-agent/setup-opa@v2
         with:
           version: latest
 
-      - name: Check OPA bundle signing capability
+      - name: Create build directory
+        run: mkdir -p build
+
+      - name: Sign OPA policy bundle
+        env:
+          OPA_SIGNING_KEY_B64: ${{ secrets.OPA_SIGNING_KEY_B64 }}
         run: |
-          echo "Checking OPA bundle signing..."
+          echo "==================================================================="
+          echo "GATE M: OPA Bundle Signing"
+          echo "==================================================================="
 
-          # Create test bundle
-          mkdir -p /tmp/opa-bundle
-          cp policy/*.rego /tmp/opa-bundle/ 2>/dev/null || true
+          # Check if signing key is available
+          if [ -z "$OPA_SIGNING_KEY_B64" ]; then
+            echo "::warning::OPA_SIGNING_KEY_B64 secret not configured"
+            echo "Using test key from fixtures for CI validation..."
 
-          # Check if we have signing keys
-          if [ -f "integrity/opa_signing_key.pem" ]; then
-            echo "OPA signing key found"
-
-            # Attempt to sign bundle
-            opa build -b /tmp/opa-bundle -o /tmp/bundle.tar.gz || true
-
-            if [ -f "/tmp/bundle.tar.gz" ]; then
-              echo "Bundle created successfully"
-              # TODO: Add actual signature verification
+            # Use test key for CI validation (NOT for production)
+            if [ -f "tests/fixtures/test_bundle_signing_key.b64" ]; then
+              export OPA_SIGNING_KEY_B64=$(cat tests/fixtures/test_bundle_signing_key.b64)
+            else
+              echo "::error::No signing key available - cannot sign bundle"
+              exit 1
             fi
-          else
-            echo "::warning::OPA signing key not found at integrity/opa_signing_key.pem"
-            echo "OPA bundle signing is a BLOCKING requirement for v6.1"
+          fi
 
-            # Create blocking stub file
-            cat > opa-bundle-signing-status.json << 'EOF'
+          # Run the signing script
+          python scripts/sign_opa_bundle.py \
+            --key-id "opa-bundle-signer-001" \
+            --policy-dir policy \
+            --output-dir build
+
+          # Verify outputs exist
+          if [ ! -f "build/opa_bundle.tar.gz" ]; then
+            echo "::error::Bundle file not created"
+            exit 1
+          fi
+
+          if [ ! -f "build/opa_bundle.tar.gz.sig" ]; then
+            echo "::error::Signature file not created"
+            exit 1
+          fi
+
+          if [ ! -f "build/opa_bundle.manifest.json" ]; then
+            echo "::error::Manifest file not created"
+            exit 1
+          fi
+
+          echo "Bundle signing completed successfully"
+
+      - name: Verify OPA bundle signature
+        run: |
+          echo "==================================================================="
+          echo "GATE M: Verifying Bundle Signature"
+          echo "==================================================================="
+
+          python -c "
+          from pathlib import Path
+          from src.policy.bundle_verify import verify_opa_bundle
+
+          result = verify_opa_bundle(
+              trust_store_path=Path('integrity/trust_store.json'),
+              bundle_dir=Path('build'),
+          )
+
+          print(f'Bundle verified: {result.verified}')
+          print(f'Bundle hash: {result.bundle_hash}')
+          print(f'Signed by: {result.key_id}')
+          print(f'Signed at: {result.signed_at}')
+          print(f'Policy files: {len(result.policy_files)}')
+
+          if not result.verified:
+              raise RuntimeError('Bundle verification failed!')
+          "
+
+          echo "Bundle signature verification passed"
+
+      - name: Verify fail-closed behavior
+        run: |
+          echo "==================================================================="
+          echo "GATE M: Verifying Fail-Closed Behavior"
+          echo "==================================================================="
+
+          # Test 1: Missing bundle should fail
+          echo "Test 1: Missing bundle detection..."
+          python -c "
+          from pathlib import Path
+          from src.policy.bundle_verify import verify_opa_bundle, PolicyBundleVerificationError
+
+          try:
+              verify_opa_bundle(
+                  trust_store_path=Path('integrity/trust_store.json'),
+                  bundle_path=Path('build/nonexistent.tar.gz'),
+              )
+              raise AssertionError('Should have raised PolicyBundleVerificationError')
+          except PolicyBundleVerificationError as e:
+              assert e.code == 'BUNDLE.FILE.NOT_FOUND'
+              print(f'PASS: Missing bundle correctly detected: {e.code}')
+          "
+
+          # Test 2: Tampered bundle should fail
+          echo "Test 2: Tampered bundle detection..."
+          cp build/opa_bundle.tar.gz build/opa_bundle_tampered.tar.gz
+          echo "tampered" >> build/opa_bundle_tampered.tar.gz
+
+          python -c "
+          from pathlib import Path
+          from src.policy.bundle_verify import PolicyBundleVerifier, PolicyBundleVerificationError
+
+          verifier = PolicyBundleVerifier(
+              trust_store_path=Path('integrity/trust_store.json'),
+              bundle_dir=Path('build'),
+          )
+          verifier.load_trust_store()
+
+          try:
+              verifier.verify_bundle(
+                  bundle_path=Path('build/opa_bundle_tampered.tar.gz'),
+              )
+              raise AssertionError('Should have raised PolicyBundleVerificationError')
+          except PolicyBundleVerificationError as e:
+              assert e.code == 'BUNDLE.HASH.MISMATCH'
+              print(f'PASS: Tampered bundle correctly detected: {e.code}')
+          "
+
+          echo "Fail-closed behavior verified"
+
+      - name: Upload bundle artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: opa-bundle
+          path: |
+            build/opa_bundle.tar.gz
+            build/opa_bundle.tar.gz.sig
+            build/opa_bundle.manifest.json
+
+      - name: Gate M Summary
+        run: |
+          cat > gate-m-summary.json << 'EOF'
           {
             "gate": "M",
             "name": "OPA Bundle Signing",
-            "status": "STUB_BLOCKING",
-            "blocking": true,
-            "requirement": "OPA policy bundles MUST be signed before loading",
-            "todo": [
-              "Generate OPA signing keypair",
-              "Store public key in trust store",
-              "Sign bundles during CI",
-              "Verify signatures before policy loading"
+            "status": "PASSED",
+            "checks": {
+              "bundle_created": true,
+              "bundle_signed": true,
+              "signature_verified": true,
+              "fail_closed_verified": true
+            },
+            "artifacts": [
+              "build/opa_bundle.tar.gz",
+              "build/opa_bundle.tar.gz.sig",
+              "build/opa_bundle.manifest.json"
             ],
             "blueprint_ref": "v6.1 Section 9"
           }
           EOF
-            cat opa-bundle-signing-status.json
-
-            # This is a blocking requirement - fail until implemented
-            echo "::error::OPA bundle signing not implemented - blocking per v6.1"
-            exit 1
-          fi
+          cat gate-m-summary.json
 
   # ==========================================================================
   # Final Gate Summary
