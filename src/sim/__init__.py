@@ -20,7 +20,7 @@ import logging
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, AsyncGenerator, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from ..core.config import Config
@@ -37,7 +37,11 @@ from ..sandbox import (
 from ..security import SecurityManager, PolicyDecision
 
 if TYPE_CHECKING:
-    from ..core.engine import ExecutionControlPlane, DecisionRecord
+    from ..core.engine import ActionContext, ExecutionControlPlane, DecisionRecord
+
+# Type alias for action_runner callable
+# This MUST be validate_and_execute_action from ExecutionControlPlane
+ActionRunner = Callable[["ActionContext"], Awaitable[Tuple["DecisionRecord", Optional[Dict[str, Any]]]]]
 
 logger = logging.getLogger(__name__)
 
@@ -148,30 +152,57 @@ def _check_bypass() -> None:
 
     v6.1 SECURITY: Now requires BOTH context variable AND token validation.
     Raises GuardBypassError if bypass is detected.
+
+    v6.1 FORENSICS: Emits forensic event BEFORE raising error to ensure
+    all bypass attempts are logged even if exception handling suppresses.
     """
+    import inspect
+
+    # Get caller info for forensics
+    caller_frame = inspect.currentframe()
+    caller_info = "unknown"
+    if caller_frame and caller_frame.f_back:
+        frame = caller_frame.f_back
+        caller_info = f"{frame.f_code.co_filename}:{frame.f_lineno}:{frame.f_code.co_name}"
+
     # Check 1: Context variable (can be spoofed, but provides defense in depth)
     if not is_legitimate_execution():
+        # FORENSIC: Log bypass attempt before raising
+        logger.critical(
+            f"CONTROL PLANE BYPASS DETECTED: direct_executor_invocation - "
+            f"caller={caller_info} legitimate_execution=False"
+        )
         raise GuardBypassError(
             message="Action execution attempted without passing through validate_and_execute_action()",
             bypass_path="direct_executor_invocation",
-            caller="Executor",
+            caller=caller_info,
         )
 
     # Check 2: Execution token (harder to spoof - requires valid token from control plane)
     token = get_current_execution_token()
     if token is None:
+        # FORENSIC: Log bypass attempt before raising
+        logger.critical(
+            f"CONTROL PLANE BYPASS DETECTED: missing_execution_token - "
+            f"caller={caller_info} token=None"
+        )
         raise GuardBypassError(
             message="Action execution attempted without valid execution token",
             bypass_path="missing_execution_token",
-            caller="Executor",
+            caller=caller_info,
         )
 
     # Token format validation (43 chars for secrets.token_urlsafe(32))
     if len(token) < 40:
+        # FORENSIC: Log bypass attempt before raising
+        logger.critical(
+            f"CONTROL PLANE BYPASS DETECTED: invalid_token_format - "
+            f"caller={caller_info} token_length={len(token)}"
+        )
         raise GuardBypassError(
             message="Invalid execution token format",
             bypass_path="invalid_token_format",
-            caller="Executor",
+            caller=caller_info,
         )
 
 
@@ -240,16 +271,79 @@ class Executor:
         if self._security_manager:
             await self._security_manager.stop()
 
-    async def execute(self, mission: Mission) -> AsyncGenerator[ActionResult, None]:
+    def _emit_bypass_forensic_event(
+        self,
+        mission_id: UUID,
+        bypass_path: str,
+        details: Dict[str, Any],
+    ) -> None:
+        """
+        Emit a forensic event for bypass attempts.
+
+        v6.1 SECURITY: ALL bypass attempts MUST be logged for forensic analysis.
+        This is a non-blocking call - bypass is logged even if emission fails.
+
+        Args:
+            mission_id: The mission where bypass was attempted
+            bypass_path: Identifier of the bypass path attempted
+            details: Additional context about the bypass attempt
+        """
+        event = {
+            "event_type": "BYPASS_ATTEMPT",
+            "timestamp": datetime.utcnow().isoformat(),
+            "mission_id": str(mission_id),
+            "bypass_path": bypass_path,
+            "severity": "CRITICAL",
+            "details": details,
+        }
+        # Critical: Always log bypass attempts
+        logger.critical(
+            f"CONTROL PLANE BYPASS ATTEMPTED: {bypass_path} - "
+            f"mission={mission_id} details={details}"
+        )
+        # In production, this would emit to a forensic event bus
+        # For now, ensure it's logged at CRITICAL level
+
+    async def execute(
+        self,
+        mission: Mission,
+        action_runner: Optional[ActionRunner] = None,
+    ) -> AsyncGenerator[ActionResult, None]:
         """
         Execute mission plan.
 
+        v6.1 SECURITY: action_runner is REQUIRED.
+        SIM MUST NOT execute tools directly - ALL execution MUST flow through
+        the engine's ExecutionControlPlane.validate_and_execute_action().
+
         Args:
             mission: Mission to execute
+            action_runner: REQUIRED callable that routes action execution through
+                          the ExecutionControlPlane. This MUST be
+                          control_plane.validate_and_execute_action.
+                          If None or missing, raises GuardBypassError.
 
         Yields:
             Action results as they complete
+
+        Raises:
+            GuardBypassError: If action_runner is not provided (bypass attempt)
         """
+        # v6.1 MANDATORY: action_runner is REQUIRED
+        # SIM cannot execute without delegation to the control plane
+        if action_runner is None:
+            self._emit_bypass_forensic_event(
+                mission_id=mission.mission_id,
+                bypass_path="execute_without_action_runner",
+                details={"method": "execute", "mission_id": str(mission.mission_id)},
+            )
+            raise GuardBypassError(
+                message="Executor.execute() called without action_runner. "
+                        "ALL execution MUST flow through ExecutionControlPlane.validate_and_execute_action()",
+                bypass_path="execute_without_action_runner",
+                caller="Executor.execute",
+            )
+
         if not mission.plan:
             logger.error(f"Mission {mission.mission_id} has no plan")
             return
@@ -279,8 +373,8 @@ class Executor:
 
                 logger.info(f"Executing phase: {context.phase_name}")
 
-                # Execute phase actions
-                async for result in self._execute_phase(phase, context, mission):
+                # Execute phase actions via action_runner (control plane)
+                async for result in self._execute_phase(phase, context, mission, action_runner):
                     yield result
 
                     # Update context
@@ -297,8 +391,14 @@ class Executor:
         phase: Dict[str, Any],
         context: ExecutionContext,
         mission: Mission,
+        action_runner: ActionRunner,
     ) -> AsyncGenerator[ActionResult, None]:
-        """Execute single phase."""
+        """
+        Execute single phase.
+
+        v6.1 SECURITY: action_runner is REQUIRED.
+        All action execution MUST flow through the control plane.
+        """
         actions = phase.get("actions", [])
 
         # Determine concurrency based on environment
@@ -314,7 +414,7 @@ class Executor:
 
             task = asyncio.create_task(
                 self._execute_action_with_semaphore(
-                    semaphore, action, context, mission
+                    semaphore, action, context, mission, action_runner
                 )
             )
             tasks.append(task)
@@ -331,10 +431,120 @@ class Executor:
         action: Dict[str, Any],
         context: ExecutionContext,
         mission: Mission,
+        action_runner: ActionRunner,
     ) -> Optional[ActionResult]:
-        """Execute action with semaphore for concurrency control."""
+        """
+        Execute action with semaphore for concurrency control.
+
+        v6.1 SECURITY: All execution MUST go through action_runner.
+        This method builds an ActionContext and delegates to the control plane.
+        Direct calls to _execute_action are NOT allowed.
+        """
         async with semaphore:
-            return await self._execute_action(action, context, mission)
+            return await self._delegate_to_control_plane(
+                action, context, mission, action_runner
+            )
+
+    async def _delegate_to_control_plane(
+        self,
+        action: Dict[str, Any],
+        context: ExecutionContext,
+        mission: Mission,
+        action_runner: ActionRunner,
+    ) -> Optional[ActionResult]:
+        """
+        Delegate action execution to the control plane via action_runner.
+
+        v6.1 SECURITY: This is the ONLY path for action execution.
+        Direct calls to _execute_action or _tool_executor.execute are BLOCKED.
+
+        Args:
+            action: Action to execute
+            context: Execution context
+            mission: Mission being executed
+            action_runner: Control plane's validate_and_execute_action
+
+        Returns:
+            ActionResult from the control plane execution
+        """
+        from ..core.engine import ActionContext
+
+        action_id = action.get("action_id", str(uuid4()))
+        action_type = action.get("type", "unknown")
+        target = action.get("target", {})
+        start_time = datetime.utcnow()
+
+        try:
+            # Build ActionContext for the control plane
+            ctx = ActionContext(
+                tenant_id=str(mission.policy_envelope.get("tenant_id", "default")),
+                campaign_id=str(mission.mission_id),
+                mode=context.environment.upper() if context.environment else "SIM",
+                risk_tier=mission.policy_envelope.get("risk_tier", 1),
+                scope_id=mission.policy_envelope.get("scope_id", str(mission.mission_id)),
+                action=action,
+                target=target,
+                entrypoint=mission.policy_envelope.get("entrypoint", {}),
+                permit=mission.policy_envelope.get("permit", {
+                    "permit_id": f"exec-permit-{mission.mission_id}",
+                    "mode": context.environment.upper() if context.environment else "SIM",
+                    "expires_at": (datetime.utcnow() + timedelta(hours=1)).isoformat(),
+                }),
+                action_id=action_id,
+                classification_level=context.classification_level,
+            )
+
+            # Delegate to control plane (THE ONLY AUTHORIZED PATH)
+            record, result = await action_runner(ctx)
+
+            duration_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+
+            # Build ActionResult from control plane response
+            if record.executed and result:
+                impact_score = result.get("impact_score", self._calculate_action_impact(action, result))
+                alerts = result.get("alerts_generated", self._estimate_alerts(action, context))
+
+                return ActionResult(
+                    action_id=UUID(action_id) if isinstance(action_id, str) else action_id,
+                    action_type=action_type,
+                    target=target.get("asset", "unknown"),
+                    status="success",
+                    timestamp=start_time,
+                    duration_ms=duration_ms,
+                    output=result,
+                    impact_score=impact_score,
+                    alerts_generated=alerts,
+                    artifacts=result.get("artifacts", []),
+                )
+            else:
+                # Control plane blocked the action
+                return ActionResult(
+                    action_id=UUID(action_id) if isinstance(action_id, str) else action_id,
+                    action_type=action_type,
+                    target=target.get("asset", "unknown"),
+                    status="blocked",
+                    timestamp=start_time,
+                    duration_ms=duration_ms,
+                    error=record.error or "Action blocked by control plane",
+                    impact_score=0.0,
+                    alerts_generated=0,
+                )
+
+        except Exception as e:
+            duration_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+            logger.error(f"Action execution via control plane failed: {action_type} - {e}")
+
+            return ActionResult(
+                action_id=UUID(action_id) if isinstance(action_id, str) else action_id,
+                action_type=action_type,
+                target=target.get("asset", "unknown"),
+                status="failed",
+                timestamp=start_time,
+                duration_ms=duration_ms,
+                error=str(e),
+                impact_score=0.0,
+                alerts_generated=0,
+            )
 
     async def _execute_action(
         self,

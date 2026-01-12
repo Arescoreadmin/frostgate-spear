@@ -1740,9 +1740,129 @@ class FrostGateSpear:
         # Check budget
         await self._governance.check_budget(mission)
 
+    def _create_action_executor_callback(self, mission: Mission) -> Callable:
+        """
+        Create an action executor callback for the control plane.
+
+        v6.1 SECURITY: This callback is invoked by the ExecutionControlPlane
+        AFTER all guards have passed. It sets up the execution context with
+        the proper token before delegating to the actual executor.
+
+        Args:
+            mission: The mission being executed
+
+        Returns:
+            An async callable that executes actions with proper authorization
+        """
+        from ..sim import mark_legitimate_execution, clear_legitimate_execution
+
+        async def execute_action_with_authorization(
+            ctx: ActionContext,
+            record: DecisionRecord,
+            execution_token: str = None,
+        ) -> Dict[str, Any]:
+            """Execute action after control plane authorization."""
+            if execution_token is None:
+                raise GuardBypassError(
+                    message="Action executor called without execution token",
+                    bypass_path="executor_callback_missing_token",
+                    caller="_create_action_executor_callback",
+                )
+
+            # Set up execution context with token
+            mark_legitimate_execution(
+                decision_record=record,
+                execution_token=execution_token,
+                action_id=ctx.action_id,
+                control_plane=None,  # Not needed for callback execution
+            )
+
+            try:
+                # Determine environment from context
+                environment = ctx.mode.lower() if ctx.mode else "simulation"
+
+                # Execute based on environment
+                if environment in ("sim", "simulation"):
+                    result = await self._executor._simulate_action(
+                        ctx.action,
+                        self._build_execution_context(ctx, mission),
+                    )
+                elif environment == "lab":
+                    result = await self._executor._execute_lab_action(
+                        ctx.action,
+                        self._build_execution_context(ctx, mission),
+                    )
+                else:
+                    result = await self._executor._execute_live_action(
+                        ctx.action,
+                        self._build_execution_context(ctx, mission),
+                    )
+
+                return result
+
+            finally:
+                clear_legitimate_execution()
+
+        return execute_action_with_authorization
+
+    def _build_execution_context(
+        self,
+        ctx: ActionContext,
+        mission: Mission,
+    ):
+        """Build ExecutionContext from ActionContext for executor methods."""
+        from ..sim import ExecutionContext
+
+        return ExecutionContext(
+            mission_id=mission.mission_id,
+            phase_name=mission.current_phase or "",
+            action_index=mission.actions_completed,
+            total_actions=mission.plan.total_actions if mission.plan else 0,
+            environment=ctx.mode.lower() if ctx.mode else "simulation",
+            classification_level=ctx.classification_level,
+            alert_count=0,
+            impact_score=mission.impact_score,
+        )
+
+    def _create_forensic_emitter_callback(self) -> Callable:
+        """
+        Create a forensic event emitter callback for the control plane.
+
+        v6.1 SECURITY: All execution events are logged for audit trail.
+
+        Returns:
+            An async callable that emits forensic events
+        """
+        async def emit_forensic_event(event: ForensicEvent) -> None:
+            """Emit forensic event to the forensics subsystem."""
+            if self._forensics:
+                try:
+                    await self._forensics.log_event({
+                        "event_id": event.event_id,
+                        "event_type": event.event_type,
+                        "timestamp": event.timestamp.isoformat(),
+                        "action_id": event.action_context.action_id,
+                        "outcome": event.outcome,
+                        "details": event.details,
+                    })
+                except Exception as e:
+                    logger.error(f"Failed to emit forensic event: {e}")
+
+            # Always log to standard logger as backup
+            logger.info(
+                f"Forensic: {event.event_type} action={event.action_context.action_id} "
+                f"outcome={event.outcome}"
+            )
+
+        return emit_forensic_event
+
     async def _execute_mission(self, mission: Mission) -> None:
         """
         Execute mission plan with full safety, MLS, and ROE enforcement.
+
+        v6.1 SECURITY: All action execution MUST flow through ExecutionControlPlane.
+        The executor receives action_runner=control_plane.validate_and_execute_action
+        to ensure NO direct tool execution is possible.
 
         Integrates:
         - Safety policy evaluation via OPA
@@ -1751,7 +1871,30 @@ class FrostGateSpear:
         - Impact score tracking
         """
         try:
-            async for action_result in self._executor.execute(mission):
+            # v6.1 MANDATORY: Create ExecutionControlPlane for this mission
+            # This control plane enforces all guards before any action execution
+            from ..sim import mark_legitimate_execution, clear_legitimate_execution
+
+            control_plane = ExecutionControlPlane(
+                permit_validator=None,  # Uses built-in validation
+                opa_client=None,  # Uses built-in evaluation
+                runtime_guard=None,  # Uses built-in guard
+                rate_limiter=None,  # Uses built-in rate limiting
+                target_safety=None,  # Uses built-in safety checks
+                action_executor=self._create_action_executor_callback(mission),
+                forensic_emitter=self._create_forensic_emitter_callback(),
+            )
+
+            # Enable test mode for simulation environments
+            if mission.policy_envelope.get("mode", "").upper() in ("SIM", "SIMULATION"):
+                control_plane._test_mode = True
+
+            # v6.1 MANDATORY: Pass control_plane.validate_and_execute_action as action_runner
+            # SIM cannot execute without this - GuardBypassError will be raised
+            async for action_result in self._executor.execute(
+                mission,
+                action_runner=control_plane.validate_and_execute_action,
+            ):
                 # Log to forensics first (for audit trail)
                 await self._forensics.log_action(mission, action_result)
 
