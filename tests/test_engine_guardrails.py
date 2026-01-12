@@ -1612,3 +1612,428 @@ class TestExecutionTokenValidation:
 
         # Revoking again should return False (already revoked)
         assert ecp.revoke_execution_token("test-action") is False
+
+
+# ============================================================================
+# Test: SIM Bypass Prevention (v6.1 MANDATORY)
+# ============================================================================
+
+
+class TestSIMBypassPrevention:
+    """
+    v6.1 SECURITY - SIM MUST NOT Execute Tools Directly
+
+    These tests verify that:
+    1. Executor.execute() REQUIRES action_runner parameter
+    2. Calling execute() without action_runner raises GuardBypassError
+    3. Direct calls to _execute_action raise GuardBypassError
+    4. Direct calls to _execute_live_action raise GuardBypassError
+    5. SIM can ONLY execute through ExecutionControlPlane.validate_and_execute_action
+
+    FAIL-FIRST DESIGN: These tests are designed to FAIL if the bypass
+    prevention is not properly implemented.
+    """
+
+    @pytest.fixture
+    def mock_mission(self):
+        """Create a mock mission for testing."""
+        from unittest.mock import MagicMock
+        from uuid import uuid4
+
+        mission = MagicMock()
+        mission.mission_id = uuid4()
+        mission.policy_envelope = {
+            "tenant_id": str(uuid4()),
+            "mode": "SIM",
+            "risk_tier": 1,
+            "scope_id": str(uuid4()),
+        }
+        mission.classification_level = "UNCLASS"
+        mission.plan = MagicMock()
+        mission.plan.total_actions = 1
+        mission.plan.phases = [
+            {
+                "name": "test_phase",
+                "actions": [
+                    {
+                        "action_id": str(uuid4()),
+                        "type": "reconnaissance",
+                        "target": {"asset": "192.168.1.1"},
+                    }
+                ],
+            }
+        ]
+        mission.current_phase = "test_phase"
+        mission.actions_completed = 0
+        mission.impact_score = 0.0
+        return mission
+
+    @pytest.mark.asyncio
+    async def test_execute_without_action_runner_raises_guard_bypass_error(
+        self,
+        mock_mission,
+    ):
+        """
+        Test that Executor.execute() raises GuardBypassError when called
+        without action_runner parameter.
+
+        This is the PRIMARY bypass prevention test.
+        """
+        from src.core.config import Config
+        from src.core.exceptions import GuardBypassError
+        from src.sim import Executor
+
+        config = Config()
+        executor = Executor(config)
+
+        # Attempt to call execute WITHOUT action_runner
+        # This MUST raise GuardBypassError
+        with pytest.raises(GuardBypassError) as exc_info:
+            async for _ in executor.execute(mock_mission):
+                pytest.fail("Execute should not yield any results without action_runner")
+
+        # Verify error details
+        assert exc_info.value.bypass_path == "execute_without_action_runner"
+        assert "action_runner" in str(exc_info.value.message).lower()
+
+    @pytest.mark.asyncio
+    async def test_execute_with_none_action_runner_raises_guard_bypass_error(
+        self,
+        mock_mission,
+    ):
+        """
+        Test that Executor.execute() raises GuardBypassError when called
+        with action_runner=None explicitly.
+        """
+        from src.core.config import Config
+        from src.core.exceptions import GuardBypassError
+        from src.sim import Executor
+
+        config = Config()
+        executor = Executor(config)
+
+        # Attempt to call execute with action_runner=None explicitly
+        with pytest.raises(GuardBypassError) as exc_info:
+            async for _ in executor.execute(mock_mission, action_runner=None):
+                pytest.fail("Execute should not yield any results with action_runner=None")
+
+        assert exc_info.value.bypass_path == "execute_without_action_runner"
+
+    @pytest.mark.asyncio
+    async def test_execute_with_valid_action_runner_succeeds(
+        self,
+        mock_mission,
+        mock_permit_validator,
+        mock_runtime_guard,
+    ):
+        """
+        Test that Executor.execute() succeeds when provided with a valid action_runner.
+        """
+        from src.core.config import Config
+        from src.core.engine import (
+            ActionContext,
+            DecisionRecord,
+            ExecutionControlPlane,
+            set_execution_control_plane,
+        )
+        from src.sim import Executor
+
+        config = Config()
+        executor = Executor(config)
+        await executor.start()
+
+        try:
+            # Track execution
+            actions_executed = []
+
+            async def mock_action_executor(ctx, record, execution_token=None):
+                actions_executed.append(ctx.action_id)
+                return {"status": "success", "simulated": True}
+
+            # Create control plane
+            ecp = ExecutionControlPlane(
+                permit_validator=mock_permit_validator,
+                runtime_guard=mock_runtime_guard,
+                action_executor=mock_action_executor,
+            )
+            ecp._test_mode = True
+            set_execution_control_plane(ecp)
+
+            # Execute WITH valid action_runner
+            results = []
+            async for result in executor.execute(
+                mock_mission,
+                action_runner=ecp.validate_and_execute_action,
+            ):
+                results.append(result)
+
+            # Should have executed at least one action
+            assert len(results) > 0, "Should have executed actions with valid action_runner"
+
+        finally:
+            await executor.stop()
+
+    @pytest.mark.asyncio
+    async def test_direct_execute_action_call_raises_guard_bypass_error(self):
+        """
+        Test that directly calling _execute_action raises GuardBypassError.
+        """
+        from src.core.config import Config
+        from src.core.exceptions import GuardBypassError
+        from src.sim import Executor, ExecutionContext, clear_legitimate_execution
+
+        # Ensure we are NOT in a legitimate execution context
+        clear_legitimate_execution()
+
+        config = Config()
+        executor = Executor(config)
+
+        context = ExecutionContext(
+            mission_id=uuid4(),
+            phase_name="test_phase",
+            action_index=0,
+            total_actions=1,
+            environment="simulation",
+            classification_level="UNCLASS",
+            alert_count=0,
+            impact_score=0.0,
+        )
+
+        action = {
+            "action_id": str(uuid4()),
+            "type": "reconnaissance",
+            "target": {"asset": "192.168.1.1"},
+        }
+
+        mission = MagicMock()
+        mission.mission_id = uuid4()
+
+        # Direct call MUST raise GuardBypassError
+        with pytest.raises(GuardBypassError) as exc_info:
+            await executor._execute_action(action, context, mission)
+
+        assert exc_info.value.bypass_path in [
+            "direct_executor_invocation",
+            "missing_execution_token",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_direct_execute_live_action_call_raises_guard_bypass_error(self):
+        """
+        Test that directly calling _execute_live_action raises GuardBypassError.
+        """
+        from src.core.config import Config
+        from src.core.exceptions import GuardBypassError
+        from src.sim import Executor, ExecutionContext, clear_legitimate_execution
+
+        # Ensure we are NOT in a legitimate execution context
+        clear_legitimate_execution()
+
+        config = Config()
+        executor = Executor(config)
+
+        context = ExecutionContext(
+            mission_id=uuid4(),
+            phase_name="test_phase",
+            action_index=0,
+            total_actions=1,
+            environment="production",
+            classification_level="UNCLASS",
+            alert_count=0,
+            impact_score=0.0,
+        )
+
+        action = {
+            "action_id": str(uuid4()),
+            "type": "reconnaissance",
+            "target": {"asset": "192.168.1.1"},
+        }
+
+        # Direct call MUST raise GuardBypassError
+        with pytest.raises(GuardBypassError) as exc_info:
+            await executor._execute_live_action(action, context)
+
+        assert exc_info.value.bypass_path in [
+            "direct_executor_invocation",
+            "missing_execution_token",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_spoofed_legitimate_execution_without_token_raises_error(self):
+        """
+        Test that setting legitimate_execution without a valid token still fails.
+
+        This tests the defense-in-depth: even if someone spoofs the context
+        variable, they still need a valid token.
+        """
+        from src.core.config import Config
+        from src.core.exceptions import GuardBypassError
+        from src.sim import (
+            Executor,
+            ExecutionContext,
+            mark_legitimate_execution,
+            clear_legitimate_execution,
+        )
+
+        config = Config()
+        executor = Executor(config)
+
+        context = ExecutionContext(
+            mission_id=uuid4(),
+            phase_name="test_phase",
+            action_index=0,
+            total_actions=1,
+            environment="simulation",
+            classification_level="UNCLASS",
+            alert_count=0,
+            impact_score=0.0,
+        )
+
+        action = {
+            "action_id": str(uuid4()),
+            "type": "reconnaissance",
+            "target": {"asset": "192.168.1.1"},
+        }
+
+        mission = MagicMock()
+        mission.mission_id = uuid4()
+
+        try:
+            # Spoof legitimate execution WITHOUT token
+            mark_legitimate_execution(
+                decision_record=None,
+                execution_token=None,  # No token!
+                action_id=None,
+                control_plane=None,
+            )
+
+            # Should still raise because no token
+            with pytest.raises(GuardBypassError) as exc_info:
+                await executor._execute_action(action, context, mission)
+
+            assert exc_info.value.bypass_path == "missing_execution_token"
+
+        finally:
+            clear_legitimate_execution()
+
+    @pytest.mark.asyncio
+    async def test_spoofed_short_token_raises_error(self):
+        """
+        Test that a short/invalid token format is rejected.
+
+        This tests token format validation - tokens must be at least 40 chars
+        (secrets.token_urlsafe(32) produces 43 chars).
+        """
+        from src.core.config import Config
+        from src.core.exceptions import GuardBypassError
+        from src.sim import (
+            Executor,
+            ExecutionContext,
+            mark_legitimate_execution,
+            clear_legitimate_execution,
+        )
+
+        config = Config()
+        executor = Executor(config)
+
+        context = ExecutionContext(
+            mission_id=uuid4(),
+            phase_name="test_phase",
+            action_index=0,
+            total_actions=1,
+            environment="simulation",
+            classification_level="UNCLASS",
+            alert_count=0,
+            impact_score=0.0,
+        )
+
+        action = {
+            "action_id": str(uuid4()),
+            "type": "reconnaissance",
+            "target": {"asset": "192.168.1.1"},
+        }
+
+        mission = MagicMock()
+        mission.mission_id = uuid4()
+
+        try:
+            # Spoof legitimate execution WITH short token
+            mark_legitimate_execution(
+                decision_record=None,
+                execution_token="short_fake_token",  # Too short!
+                action_id="test",
+                control_plane=None,
+            )
+
+            # Should still raise because token is too short
+            with pytest.raises(GuardBypassError) as exc_info:
+                await executor._execute_action(action, context, mission)
+
+            assert exc_info.value.bypass_path == "invalid_token_format"
+
+        finally:
+            clear_legitimate_execution()
+
+    @pytest.mark.asyncio
+    async def test_bypass_attempt_emits_forensic_log(self, caplog):
+        """
+        Test that bypass attempts are logged at CRITICAL level for forensics.
+        """
+        import logging
+        from src.core.config import Config
+        from src.core.exceptions import GuardBypassError
+        from src.sim import Executor, clear_legitimate_execution
+
+        # Ensure we're not in legitimate context
+        clear_legitimate_execution()
+
+        config = Config()
+        executor = Executor(config)
+
+        mock_mission = MagicMock()
+        mock_mission.mission_id = uuid4()
+        mock_mission.plan = MagicMock()
+        mock_mission.plan.phases = []
+
+        # Set up logging capture
+        with caplog.at_level(logging.CRITICAL):
+            try:
+                async for _ in executor.execute(mock_mission):
+                    pass
+            except GuardBypassError:
+                pass
+
+        # Should have logged CRITICAL bypass attempt
+        assert any(
+            "BYPASS" in record.message.upper()
+            for record in caplog.records
+            if record.levelno >= logging.CRITICAL
+        ), "Bypass attempt should be logged at CRITICAL level"
+
+    @pytest.mark.asyncio
+    async def test_engine_passes_action_runner_to_executor(self):
+        """
+        Test that the FrostGateSpear engine properly passes action_runner
+        to the executor when executing missions.
+
+        This is an integration test to verify the engine-executor contract.
+        """
+        from src.core.config import Config
+        from src.core.engine import FrostGateSpear, EngineState
+
+        config = Config()
+        engine = FrostGateSpear(config)
+
+        # The _execute_mission method should create a control plane and
+        # pass validate_and_execute_action as action_runner
+        # We verify this by checking the method implementation
+        import inspect
+        source = inspect.getsource(engine._execute_mission)
+
+        # Verify the implementation includes action_runner
+        assert "action_runner=" in source, (
+            "Engine._execute_mission MUST pass action_runner to executor"
+        )
+        assert "validate_and_execute_action" in source, (
+            "Engine MUST pass control_plane.validate_and_execute_action as action_runner"
+        )
