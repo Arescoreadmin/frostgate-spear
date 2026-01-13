@@ -32,6 +32,8 @@ from cryptography.hazmat.primitives.asymmetric import ed25519, padding
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.exceptions import InvalidSignature
 
+from ..core.exceptions import ProvenanceValidationError
+
 logger = logging.getLogger(__name__)
 
 
@@ -948,3 +950,243 @@ async def create_integrity_manager(
     manager = IntegrityManager(trust_store_path, require_signatures)
     await manager.start()
     return manager
+
+
+@dataclass
+class SBOMValidationResult:
+    """Result of SBOM validation."""
+    valid: bool
+    format: Optional[str]
+    errors: List[str]
+
+
+@dataclass
+class SBOMCompletenessResult:
+    """Result of SBOM completeness validation."""
+    valid: bool
+    coverage: float
+    missing_components: List[str]
+
+
+@dataclass
+class LicenseValidationResult:
+    """Result of license validation."""
+    valid: bool
+    prohibited_licenses: List[str]
+
+
+@dataclass
+class ProvenanceValidationResult:
+    """Result of provenance validation."""
+    valid: bool
+    slsa_level: int
+    warnings: List[str]
+
+
+@dataclass
+class SignatureValidationResult:
+    """Result of signature validation."""
+    valid: bool
+    warnings: List[str]
+    errors: List[str]
+
+
+@dataclass
+class AttestationValidationResult:
+    """Result of attestation validation."""
+    valid: bool
+    hash: Optional[str]
+    errors: List[str]
+
+
+@dataclass
+class SupplyChainValidationResult:
+    """Result of supply chain validation."""
+    overall_valid: bool
+    sbom_valid: Optional[bool]
+    provenance_valid: Optional[bool]
+    signature_valid: Optional[bool]
+    attestation_valid: Optional[bool]
+    warnings: List[str]
+    errors: List[str]
+
+
+class IntegrityVerifier:
+    """
+    Integrity verification helper for compliance tests.
+
+    Wraps core integrity primitives with a simplified async interface.
+    """
+
+    def __init__(self, config: "Config"):
+        from ..core.config import Config
+        if not isinstance(config, Config):
+            raise ValueError("IntegrityVerifier requires Config")
+        self._config = config
+        self._manager = IntegrityManager(
+            trust_store_path=config.policy.trust_store_path,
+            require_signatures=True,
+        )
+        self._registry: Dict[str, List[Dict[str, Any]]] = {}
+
+    async def start(self) -> None:
+        await self._manager.start()
+
+    async def stop(self) -> None:
+        return None
+
+    async def validate_sbom(self, artifact: Dict[str, Any]) -> SBOMValidationResult:
+        sbom = artifact.get("sbom")
+        if not sbom:
+            return SBOMValidationResult(valid=False, format=None, errors=["sbom missing"])
+        sbom_format = sbom.get("format")
+        return SBOMValidationResult(valid=True, format=sbom_format, errors=[])
+
+    async def validate_sbom_completeness(
+        self, artifact: Dict[str, Any]
+    ) -> SBOMCompletenessResult:
+        sbom = artifact.get("sbom") or {}
+        expected = artifact.get("expected_components", [])
+        components = sbom.get("components", [])
+        present = {comp.get("name") for comp in components if comp.get("name")}
+        missing = [name for name in expected if name not in present]
+        coverage = 0.0 if not expected else (len(expected) - len(missing)) / len(expected)
+        return SBOMCompletenessResult(valid=coverage >= 1.0, coverage=coverage, missing_components=missing)
+
+    async def validate_licenses(self, sbom: Dict[str, Any]) -> LicenseValidationResult:
+        prohibited = {"GPL-3.0", "AGPL-3.0", "LGPL-3.0"}
+        blocked = []
+        for component in sbom.get("components", []):
+            license_id = component.get("license")
+            if license_id and license_id.upper() in prohibited:
+                blocked.append(license_id)
+        return LicenseValidationResult(valid=len(blocked) == 0, prohibited_licenses=blocked)
+
+    async def validate_provenance(
+        self, artifact: Dict[str, Any], required_level: int = 3
+    ) -> ProvenanceValidationResult:
+        provenance = artifact.get("provenance") or {}
+        slsa_level = int(provenance.get("slsa_level") or 0)
+        warnings = []
+        if required_level and slsa_level < required_level:
+            raise ProvenanceValidationError(
+                f"SLSA level {slsa_level} below required {required_level}"
+            )
+        if not provenance.get("source"):
+            warnings.append("missing source metadata")
+        return ProvenanceValidationResult(valid=slsa_level >= required_level, slsa_level=slsa_level, warnings=warnings)
+
+    async def validate_artifact_signature(
+        self, artifact: Dict[str, Any]
+    ) -> SignatureValidationResult:
+        signature = artifact.get("signature")
+        errors: List[str] = []
+        warnings: List[str] = []
+        if not signature:
+            errors.append("signature missing")
+            return SignatureValidationResult(valid=False, warnings=warnings, errors=errors)
+        signed_digest = signature.get("signed_digest")
+        digest = artifact.get("digest")
+        if signed_digest and digest and signed_digest != digest:
+            errors.append("signature digest mismatch")
+        if not signature.get("keyref"):
+            warnings.append("missing keyref")
+        return SignatureValidationResult(valid=len(errors) == 0, warnings=warnings, errors=errors)
+
+    async def validate_artifact_attestation(
+        self, artifact: Dict[str, Any]
+    ) -> AttestationValidationResult:
+        attestation = artifact.get("attestation")
+        errors: List[str] = []
+        if not attestation:
+            errors.append("attestation missing")
+            return AttestationValidationResult(valid=False, hash=None, errors=errors)
+        attestation_hash = attestation.get("hash")
+        if not attestation_hash:
+            errors.append("attestation hash missing")
+        return AttestationValidationResult(
+            valid=len(errors) == 0,
+            hash=attestation_hash,
+            errors=errors,
+        )
+
+    async def validate_supply_chain(
+        self, artifact: Dict[str, Any]
+    ) -> SupplyChainValidationResult:
+        warnings: List[str] = []
+        errors: List[str] = []
+
+        sbom_result = await self.validate_sbom(artifact) if artifact.get("sbom") is not None else None
+        license_result = (
+            await self.validate_licenses(artifact.get("sbom", {}))
+            if artifact.get("sbom") is not None
+            else None
+        )
+        provenance_result = (
+            await self.validate_provenance(artifact)
+            if artifact.get("provenance") is not None
+            else None
+        )
+        signature_result = (
+            await self.validate_artifact_signature(artifact)
+            if artifact.get("signature") is not None
+            else None
+        )
+        attestation_result = (
+            await self.validate_artifact_attestation(artifact)
+            if artifact.get("attestation") is not None
+            else None
+        )
+
+        for result in [
+            sbom_result,
+            license_result,
+            provenance_result,
+            signature_result,
+            attestation_result,
+        ]:
+            if result is None:
+                continue
+            result_errors = getattr(result, "errors", [])
+            result_warnings = getattr(result, "warnings", [])
+            errors.extend(result_errors)
+            warnings.extend(result_warnings)
+
+        sbom_valid = (
+            (sbom_result.valid if sbom_result else True)
+            and (license_result.valid if license_result else True)
+        )
+        overall_valid = all(
+            [
+                sbom_valid,
+                provenance_result.valid if provenance_result else True,
+                signature_result.valid if signature_result else True,
+                attestation_result.valid if attestation_result else True,
+            ]
+        )
+
+        return SupplyChainValidationResult(
+            overall_valid=overall_valid,
+            sbom_valid=sbom_valid if sbom_result else None,
+            provenance_valid=provenance_result.valid if provenance_result else None,
+            signature_valid=signature_result.valid if signature_result else None,
+            attestation_valid=attestation_result.valid if attestation_result else None,
+            warnings=warnings,
+            errors=errors,
+        )
+
+    async def register_artifact(self, artifact: Dict[str, Any]) -> None:
+        artifact_id = artifact.get("artifact_id")
+        if not artifact_id:
+            raise ValueError("artifact_id is required")
+        history = self._registry.setdefault(artifact_id, [])
+        history.append(dict(artifact))
+
+    async def get_artifact(self, artifact_id: str) -> Optional[Dict[str, Any]]:
+        history = self._registry.get(artifact_id, [])
+        if not history:
+            return None
+        return history[-1]
+
+    async def get_artifact_history(self, artifact_id: str) -> List[Dict[str, Any]]:
+        return list(self._registry.get(artifact_id, []))

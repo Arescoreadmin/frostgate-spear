@@ -631,10 +631,14 @@ class StrictValidator:
             "password", "secret", "api_key", "apikey", "token",
             "private_key", "privatekey", "credential", "auth_token"
         ]
+        allowed_keys = {"credential_mode", "credential_refs"}
 
         if isinstance(obj, dict):
             for key, value in obj.items():
                 key_lower = key.lower()
+                if key_lower in allowed_keys:
+                    self._check_for_raw_secrets(value, f"{path}.{key}")
+                    continue
                 for pattern in secret_patterns:
                     if pattern in key_lower:
                         # Allow vault references
@@ -680,10 +684,16 @@ class StrictValidator:
         risk_tier = campaign.get("risk_tier", 1)
         mode = campaign.get("mode", "SIM")
         scope_hash = campaign.get("scope_ref", {}).get("scope_hash", "")
-        campaign_hash = self._compute_hash({
+        campaign_content = {
             k: v for k, v in campaign.items()
             if k not in ("approvals", "preflight")
-        })
+        }
+        cr_ref = campaign_content.get("cr_ref")
+        if isinstance(cr_ref, dict) and "campaign_hash" in cr_ref:
+            cr_ref = dict(cr_ref)
+            cr_ref.pop("campaign_hash", None)
+            campaign_content["cr_ref"] = cr_ref
+        campaign_hash = self._compute_hash(campaign_content)
 
         # Get required roles for this risk tier
         required_roles = set(self.RISK_TIER_APPROVALS.get(risk_tier, ["Security"]))
@@ -1586,7 +1596,11 @@ class StrictValidator:
                 )
 
             # Verify bundle hash
-            bundle_content = {k: v for k, v in bundle.items() if k != "bundle_hash"}
+            bundle_content = {
+                k: v
+                for k, v in bundle.items()
+                if k not in ("bundle_hash", "bundle_id")
+            }
             expected_hash = self._compute_hash(bundle_content)
             if bundle["bundle_hash"] != expected_hash:
                 raise ValidationFailure(

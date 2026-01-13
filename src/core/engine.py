@@ -186,8 +186,8 @@ class ExecutionControlPlane:
     6. Execute the action
     7. Emit forensic event
 
-    SECURITY: Uses non-forgeable execution tokens (secrets.token_urlsafe(32))
-    stored per-instance. Executor MUST present valid token to execute.
+    SECURITY: Uses non-forgeable execution tokens (secrets.token_urlsafe(32)).
+    Executor MUST present valid token to execute.
     This is NOT crypto, but much harder to spoof than context variables.
     """
 
@@ -224,11 +224,6 @@ class ExecutionControlPlane:
         # For testing: allow mock execution
         self._test_mode = False
 
-        # v6.1 SECURITY: Instance-bound execution token
-        # This token is created per-instance and MUST be presented by executors
-        # Token is 256 bits of entropy (32 bytes base64 encoded = 43 chars)
-        self._instance_token = secrets.token_urlsafe(32)
-
         # Active execution tokens: maps action_id -> one-time execution token
         # Token is consumed after use to prevent replay attacks
         self._active_execution_tokens: Dict[str, str] = {}
@@ -254,7 +249,7 @@ class ExecutionControlPlane:
                 caller="ExecutionControlPlane",
             )
 
-        # Generate action-specific token combining instance token + action_id + random
+        # Generate action-specific token bound to action_id and random nonce
         action_token = secrets.token_urlsafe(32)
 
         # Store token for validation
@@ -263,16 +258,21 @@ class ExecutionControlPlane:
         logger.debug(f"Generated execution token for action {action_id}")
         return action_token
 
-    def validate_execution_token(self, action_id: str, token: str) -> bool:
+    def validate_execution_token(
+        self,
+        token: str,
+        action_id: str,
+        consume: bool = True,
+    ) -> bool:
         """
         Validate an execution token.
 
-        Token MUST match the one generated for this action_id.
-        Token is CONSUMED after validation (one-time use).
+        Validate against the action token registry.
 
         Args:
-            action_id: The action being executed
             token: The token presented by the executor
+            action_id: Action ID for per-action token validation
+            consume: Whether to consume the per-action token on success
 
         Returns:
             True if token is valid, False otherwise
@@ -286,11 +286,11 @@ class ExecutionControlPlane:
         # Constant-time comparison to prevent timing attacks
         valid = secrets.compare_digest(expected_token, token)
 
-        if valid:
+        if valid and consume:
             # Consume token - one-time use only
             del self._active_execution_tokens[action_id]
             logger.debug(f"Execution token validated and consumed for action {action_id}")
-        else:
+        elif not valid:
             logger.warning(f"Invalid execution token presented for action {action_id}")
 
         return valid
@@ -312,15 +312,6 @@ class ExecutionControlPlane:
             logger.info(f"Execution token revoked for action {action_id}")
             return True
         return False
-
-    def get_instance_token_hash(self) -> str:
-        """
-        Get a hash of the instance token for logging/debugging.
-
-        Never expose the actual token - only a hash for correlation.
-        """
-        import hashlib
-        return hashlib.sha256(self._instance_token.encode()).hexdigest()[:16]
 
     def _compute_context_hash(self, ctx: ActionContext) -> str:
         """Compute hash of action context for integrity verification."""
@@ -441,7 +432,10 @@ class ExecutionControlPlane:
                 elif self._test_mode:
                     # Test mode: simulate execution (token still required for test validation)
                     # Validate token to prove the flow is correct even in tests
-                    if not self.validate_execution_token(ctx.action_id, execution_token):
+                    if not self.validate_execution_token(
+                        token=execution_token,
+                        action_id=ctx.action_id,
+                    ):
                         raise GuardBypassError(
                             message="Test mode execution failed token validation",
                             bypass_path="test_mode_token_failure",
@@ -457,8 +451,6 @@ class ExecutionControlPlane:
                     record.execution_result = execution_result
                 else:
                     # No executor configured - this is a configuration error
-                    # Revoke the unused token
-                    self.revoke_execution_token(ctx.action_id)
                     record.error = "No action executor configured"
             except Exception as e:
                 # If execution fails, ensure token is revoked if not consumed
@@ -1116,7 +1108,11 @@ def create_token_validated_executor(
 
         try:
             # Validate token with control plane
-            if not control_plane.validate_execution_token(ctx.action_id, execution_token):
+            if not control_plane.validate_execution_token(
+                token=execution_token,
+                action_id=ctx.action_id,
+                consume=True,
+            ):
                 raise GuardBypassError(
                     message="Invalid execution token",
                     bypass_path="token_validation_failed",
@@ -1740,7 +1736,11 @@ class FrostGateSpear:
         # Check budget
         await self._governance.check_budget(mission)
 
-    def _create_action_executor_callback(self, mission: Mission) -> Callable:
+    def _create_action_executor_callback(
+        self,
+        mission: Mission,
+        control_plane: ExecutionControlPlane,
+    ) -> Callable:
         """
         Create an action executor callback for the control plane.
 
@@ -1754,56 +1754,37 @@ class FrostGateSpear:
         Returns:
             An async callable that executes actions with proper authorization
         """
-        from ..sim import mark_legitimate_execution, clear_legitimate_execution
-
         async def execute_action_with_authorization(
             ctx: ActionContext,
             record: DecisionRecord,
-            execution_token: str = None,
         ) -> Dict[str, Any]:
             """Execute action after control plane authorization."""
-            if execution_token is None:
-                raise GuardBypassError(
-                    message="Action executor called without execution token",
-                    bypass_path="executor_callback_missing_token",
-                    caller="_create_action_executor_callback",
+            # Determine environment from context
+            environment = ctx.mode.lower() if ctx.mode else "simulation"
+
+            # Execute based on environment
+            if environment in ("sim", "simulation"):
+                result = await self._executor._simulate_action(
+                    ctx.action,
+                    self._build_execution_context(ctx, mission),
+                )
+            elif environment == "lab":
+                result = await self._executor._execute_lab_action(
+                    ctx.action,
+                    self._build_execution_context(ctx, mission),
+                )
+            else:
+                result = await self._executor._execute_live_action(
+                    ctx.action,
+                    self._build_execution_context(ctx, mission),
                 )
 
-            # Set up execution context with token
-            mark_legitimate_execution(
-                decision_record=record,
-                execution_token=execution_token,
-                action_id=ctx.action_id,
-                control_plane=None,  # Not needed for callback execution
-            )
+            return result
 
-            try:
-                # Determine environment from context
-                environment = ctx.mode.lower() if ctx.mode else "simulation"
-
-                # Execute based on environment
-                if environment in ("sim", "simulation"):
-                    result = await self._executor._simulate_action(
-                        ctx.action,
-                        self._build_execution_context(ctx, mission),
-                    )
-                elif environment == "lab":
-                    result = await self._executor._execute_lab_action(
-                        ctx.action,
-                        self._build_execution_context(ctx, mission),
-                    )
-                else:
-                    result = await self._executor._execute_live_action(
-                        ctx.action,
-                        self._build_execution_context(ctx, mission),
-                    )
-
-                return result
-
-            finally:
-                clear_legitimate_execution()
-
-        return execute_action_with_authorization
+        return create_token_validated_executor(
+            control_plane,
+            execute_action_with_authorization,
+        )
 
     def _build_execution_context(
         self,
@@ -1881,8 +1862,12 @@ class FrostGateSpear:
                 runtime_guard=None,  # Uses built-in guard
                 rate_limiter=None,  # Uses built-in rate limiting
                 target_safety=None,  # Uses built-in safety checks
-                action_executor=self._create_action_executor_callback(mission),
+                action_executor=None,
                 forensic_emitter=self._create_forensic_emitter_callback(),
+            )
+            control_plane._action_executor = self._create_action_executor_callback(
+                mission,
+                control_plane,
             )
 
             # Enable test mode for simulation environments
@@ -1894,6 +1879,7 @@ class FrostGateSpear:
             async for action_result in self._executor.execute(
                 mission,
                 action_runner=control_plane.validate_and_execute_action,
+                expected_control_plane=control_plane,
             ):
                 # Log to forensics first (for audit trail)
                 await self._forensics.log_action(mission, action_result)

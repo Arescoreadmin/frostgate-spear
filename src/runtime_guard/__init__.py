@@ -186,6 +186,8 @@ class RateLimitCounter:
         """
         if db_path is None:
             db_path = Path(__file__).parent.parent.parent / "data" / "rate_limits.db"
+        elif isinstance(db_path, str):
+            db_path = Path(db_path)
 
         self._db_path = db_path
         self._window_seconds = window_seconds
@@ -288,6 +290,48 @@ class RateLimitCounter:
         """
         current_rate = self.get_rate(target_id, window_seconds)
         return current_rate < max_rate, current_rate
+
+    def check_and_record(
+        self,
+        target_id: str,
+        campaign_id: str,
+        action_type: str,
+        max_rate: int,
+        window_seconds: Optional[int] = None,
+    ) -> Tuple[bool, int]:
+        """
+        Atomically check rate limit and record the action if allowed.
+
+        Returns:
+            Tuple of (allowed, current_rate_after_check)
+        """
+        window = window_seconds or self._window_seconds
+        cutoff = time.time() - window
+
+        with self._lock:
+            with self._get_connection() as conn:
+                cursor = conn.execute(
+                    """
+                    SELECT COUNT(*) FROM rate_events
+                    WHERE target_id = ? AND timestamp > ?
+                    """,
+                    (target_id, cutoff),
+                )
+                result = cursor.fetchone()
+                current_rate = result[0] if result else 0
+
+                if current_rate >= max_rate:
+                    return False, current_rate
+
+                conn.execute(
+                    """
+                    INSERT INTO rate_events (target_id, campaign_id, action_type, timestamp)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (target_id, campaign_id, action_type, time.time()),
+                )
+                conn.commit()
+                return True, current_rate + 1
 
     def cleanup_old_events(self, max_age_seconds: int = 3600) -> int:
         """
@@ -420,10 +464,12 @@ class RuntimeBehaviorGuard:
                     f"Human confirmation required for destructive action in mode {mode.name}",
                 )
 
-        # Check rate limit
-        allowed, current_rate = self._rate_counter.check_rate(
-            target_id,
-            contract.max_rate_per_target,
+        # Check rate limit (atomic check + record)
+        allowed, current_rate = self._rate_counter.check_and_record(
+            target_id=target_id,
+            campaign_id=campaign_id,
+            action_type=action.get("action_type", "default"),
+            max_rate=contract.max_rate_per_target,
         )
         if not allowed:
             return self._create_decision(
@@ -433,9 +479,6 @@ class RuntimeBehaviorGuard:
                 f"Rate limit exceeded for target {target_id}: {current_rate}/{contract.max_rate_per_target} per minute",
                 details={"current_rate": current_rate, "max_rate": contract.max_rate_per_target},
             )
-
-        # Record action for rate limiting
-        self._rate_counter.record_action(target_id, campaign_id, action.get("action_type", "default"))
 
         # All checks passed
         return self._create_decision(

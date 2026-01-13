@@ -141,9 +141,11 @@ def _validate_execution_token() -> bool:
         logger.warning("Control plane reference not set - cannot validate token")
         return False
 
-    # Token validation is handled by the control plane
-    # We just verify the token was provided
-    return True
+    return control_plane.validate_execution_token(
+        token=token,
+        action_id=action_id,
+        consume=False,
+    )
 
 
 def _check_bypass() -> None:
@@ -178,7 +180,20 @@ def _check_bypass() -> None:
             caller=caller_info,
         )
 
-    # Check 2: Execution token (harder to spoof - requires valid token from control plane)
+    # Check 2: Control plane reference (required for token validation)
+    control_plane = _control_plane_ref.get()
+    if control_plane is None:
+        logger.critical(
+            f"CONTROL PLANE BYPASS DETECTED: missing_control_plane_reference - "
+            f"caller={caller_info}"
+        )
+        raise GuardBypassError(
+            message="Action execution attempted without control plane reference",
+            bypass_path="missing_control_plane_reference",
+            caller=caller_info,
+        )
+
+    # Check 3: Execution token (requires valid token from control plane)
     token = get_current_execution_token()
     if token is None:
         # FORENSIC: Log bypass attempt before raising
@@ -192,16 +207,26 @@ def _check_bypass() -> None:
             caller=caller_info,
         )
 
-    # Token format validation (43 chars for secrets.token_urlsafe(32))
-    if len(token) < 40:
-        # FORENSIC: Log bypass attempt before raising
+    action_id = _current_action_id.get()
+    if action_id is None:
         logger.critical(
-            f"CONTROL PLANE BYPASS DETECTED: invalid_token_format - "
-            f"caller={caller_info} token_length={len(token)}"
+            f"CONTROL PLANE BYPASS DETECTED: missing_action_id - "
+            f"caller={caller_info}"
         )
         raise GuardBypassError(
-            message="Invalid execution token format",
-            bypass_path="invalid_token_format",
+            message="Action execution attempted without action_id",
+            bypass_path="missing_action_id",
+            caller=caller_info,
+        )
+
+    if not _validate_execution_token():
+        logger.critical(
+            f"CONTROL PLANE BYPASS DETECTED: invalid_execution_token - "
+            f"caller={caller_info}"
+        )
+        raise GuardBypassError(
+            message="Action execution attempted with invalid execution token",
+            bypass_path="token_validation_failed",
             caller=caller_info,
         )
 
@@ -308,6 +333,7 @@ class Executor:
         self,
         mission: Mission,
         action_runner: Optional[ActionRunner] = None,
+        expected_control_plane: Optional["ExecutionControlPlane"] = None,
     ) -> AsyncGenerator[ActionResult, None]:
         """
         Execute mission plan.
@@ -322,6 +348,8 @@ class Executor:
                           the ExecutionControlPlane. This MUST be
                           control_plane.validate_and_execute_action.
                           If None or missing, raises GuardBypassError.
+            expected_control_plane: The control plane instance expected to own
+                          the action_runner for this mission.
 
         Yields:
             Action results as they complete
@@ -343,6 +371,37 @@ class Executor:
                 bypass_path="execute_without_action_runner",
                 caller="Executor.execute",
             )
+        else:
+            from ..core.engine import ExecutionControlPlane
+
+            runner_owner = getattr(action_runner, "__self__", None)
+            if (
+                runner_owner is None
+                or not isinstance(runner_owner, ExecutionControlPlane)
+                or getattr(action_runner, "__name__", "") != "validate_and_execute_action"
+            ):
+                self._emit_bypass_forensic_event(
+                    mission_id=mission.mission_id,
+                    bypass_path="execute_with_untrusted_action_runner",
+                    details={"method": "execute", "mission_id": str(mission.mission_id)},
+                )
+                raise GuardBypassError(
+                    message="Executor.execute() called with untrusted action_runner. "
+                            "ALL execution MUST flow through ExecutionControlPlane.validate_and_execute_action()",
+                    bypass_path="execute_with_untrusted_action_runner",
+                    caller="Executor.execute",
+                )
+            if expected_control_plane is not None and runner_owner is not expected_control_plane:
+                self._emit_bypass_forensic_event(
+                    mission_id=mission.mission_id,
+                    bypass_path="execute_with_mismatched_control_plane",
+                    details={"method": "execute", "mission_id": str(mission.mission_id)},
+                )
+                raise GuardBypassError(
+                    message="Executor.execute() called with action_runner from a different control plane instance.",
+                    bypass_path="execute_with_mismatched_control_plane",
+                    caller="Executor.execute",
+                )
 
         if not mission.plan:
             logger.error(f"Mission {mission.mission_id} has no plan")
@@ -561,7 +620,14 @@ class Executor:
         # v6.1 BYPASS PREVENTION: Verify this is a legitimate execution path
         _check_bypass()
 
-        action_id = UUID(action.get("action_id", str(uuid4())))
+        action_id_raw = action.get("action_id", str(uuid4()))
+        if isinstance(action_id_raw, UUID):
+            action_id = action_id_raw
+        else:
+            try:
+                action_id = UUID(str(action_id_raw))
+            except (ValueError, TypeError):
+                action_id = uuid4()
         action_type = action.get("type", "unknown")
         target = action.get("target", {}).get("asset", "unknown")
 
