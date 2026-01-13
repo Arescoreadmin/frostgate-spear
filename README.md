@@ -180,6 +180,36 @@ asyncio.run(main())
 
 ## Development
 
+### Compliance & test dependencies
+
+Install the test extras (includes numpy) before running compliance suites:
+
+```sh
+pip install .[test]
+```
+
+Run compliance in strict mode so missing numpy fails fast:
+
+```sh
+FGS_STRICT_COMPLIANCE=1 pytest -q
+```
+
+For locked networks, set your package indexes explicitly:
+
+```sh
+PIP_INDEX_URL=https://your.index/simple \
+PIP_EXTRA_INDEX_URL=https://your.extra.index/simple \
+pip install .[test]
+```
+
+For offline installs, populate a local wheelhouse and use the Makefile target:
+
+```sh
+mkdir -p vendor/wheels
+pip download -d vendor/wheels .[test]
+make deps-test-offline
+```
+
 ### Running Tests
 
 ```bash

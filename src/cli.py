@@ -165,6 +165,9 @@ def create_parser() -> argparse.ArgumentParser:
     # Version command
     subparsers.add_parser("version", help="Show version")
 
+    # Health command
+    subparsers.add_parser("health", help="Health check")
+
     # Watch command (v6.1 requirement)
     watch_parser = subparsers.add_parser(
         "watch",
@@ -431,6 +434,13 @@ def cmd_version(args: argparse.Namespace, config: Config) -> int:
     """Show version."""
     from . import __version__
     print(f"Frost Gate Spear v{__version__}")
+    return 0
+
+
+def cmd_health() -> int:
+    """Emit a health check response."""
+    payload = {"status": "ok"}
+    print(json.dumps(payload))
     return 0
 
 
@@ -737,6 +747,9 @@ async def async_main(args: argparse.Namespace, config: Config) -> int:
 
     elif args.command == "version":
         return cmd_version(args, config)
+
+    elif args.command == "health":
+        return cmd_health()
 
     elif args.command == "watch":
         return await cmd_watch(args, config)

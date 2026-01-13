@@ -19,7 +19,7 @@ def discover_repo_root() -> Path:
     Discover the repository root using multiple strategies.
 
     Priority:
-    1. FROSTGATE_REPO_ROOT environment variable
+    1. FGS_REPO_ROOT environment variable
     2. Git rev-parse --show-toplevel
     3. Path traversal from conftest.py location
 
@@ -30,10 +30,10 @@ def discover_repo_root() -> Path:
         RuntimeError: If repo root cannot be discovered
     """
     # Strategy 1: Environment variable override
-    env_root = os.environ.get("FROSTGATE_REPO_ROOT")
+    env_root = os.environ.get("FGS_REPO_ROOT") or os.environ.get("FROSTGATE_REPO_ROOT")
     if env_root:
         root = Path(env_root)
-        if root.is_dir() and (root / "src").is_dir():
+        if root.is_dir() and (root / "pyproject.toml").is_file():
             return root
 
     # Strategy 2: Git rev-parse
@@ -46,7 +46,7 @@ def discover_repo_root() -> Path:
             cwd=Path(__file__).parent,
         )
         git_root = Path(result.stdout.strip())
-        if git_root.is_dir() and (git_root / "src").is_dir():
+        if git_root.is_dir() and (git_root / "pyproject.toml").is_file():
             return git_root
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
@@ -54,7 +54,7 @@ def discover_repo_root() -> Path:
     # Strategy 3: Path traversal from conftest.py
     current = Path(__file__).resolve().parent
     for _ in range(10):  # Max 10 levels up
-        if (current / "src").is_dir() and (current / "pyproject.toml").is_file():
+        if (current / "pyproject.toml").is_file() or (current / ".git").exists():
             return current
         parent = current.parent
         if parent == current:
@@ -62,7 +62,7 @@ def discover_repo_root() -> Path:
         current = parent
 
     raise RuntimeError(
-        "Could not discover repo root. Set FROSTGATE_REPO_ROOT environment variable "
+        "Could not discover repo root. Set FGS_REPO_ROOT environment variable "
         "or ensure tests are run from within the repository."
     )
 
@@ -70,10 +70,19 @@ def discover_repo_root() -> Path:
 # Discover and configure repo root
 REPO_ROOT = discover_repo_root()
 
+# Compatibility shim for legacy hardcoded paths in tests
+_legacy_root = Path("/home/user/frostgate-spear")
+try:
+    if not _legacy_root.exists():
+        _legacy_root.parent.mkdir(parents=True, exist_ok=True)
+        _legacy_root.symlink_to(REPO_ROOT)
+except OSError:
+    pass
+
 # Add src to Python path for imports
 src_path = str(REPO_ROOT / "src")
 if src_path not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+    sys.path.insert(0, src_path)
 
 
 @pytest.fixture(scope="session")

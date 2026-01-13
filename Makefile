@@ -1,6 +1,7 @@
 # Frost Gate Spear Makefile
 
 .PHONY: help install dev test lint format type-check clean docker-build docker-up docker-down
+.PHONY: deps-test-offline
 
 # Default target
 help:
@@ -33,6 +34,9 @@ install:
 dev:
 	pip install -e ".[dev]"
 	pre-commit install
+
+deps-test-offline:
+	pip install --no-index --find-links vendor/wheels ".[test]"
 
 # Testing
 test:

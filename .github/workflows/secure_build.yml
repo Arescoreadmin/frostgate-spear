@@ -278,6 +278,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install test dependencies
+        run: pip install -e ".[test]"
+
       - name: Download SBOM
         uses: actions/download-artifact@v4
         with:
@@ -298,6 +306,12 @@ jobs:
               exit 1
             fi
           done
+
+      - name: Run compliance tests (strict)
+        env:
+          FGS_STRICT_COMPLIANCE: "1"
+        run: |
+          pytest -q tests/compliance
 
       - name: Validate artifact provenance
         run: |

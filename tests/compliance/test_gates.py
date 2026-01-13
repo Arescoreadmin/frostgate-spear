@@ -12,6 +12,8 @@ Tests all 7 gates as defined in the blueprint:
 """
 
 import asyncio
+import importlib.util
+import os
 import pytest
 from datetime import datetime
 from uuid import uuid4
@@ -19,6 +21,21 @@ from uuid import uuid4
 from src.core.config import Config, ClassificationLevel
 from src.governance import GovernanceManager
 from src.core.exceptions import PromotionGateError
+
+STRICT_COMPLIANCE = os.getenv("FGS_STRICT_COMPLIANCE") == "1"
+HAS_NUMPY = importlib.util.find_spec("numpy") is not None
+if not HAS_NUMPY:
+    if STRICT_COMPLIANCE:
+        pytest.fail(
+            "FGS_STRICT_COMPLIANCE=1 but numpy is not installed. "
+            "Install with: pip install .[test]"
+        )
+    pytest.skip(
+        "numpy not installed; skipping gate compliance tests",
+        allow_module_level=True,
+    )
+
+import numpy as np  # noqa: F401
 
 
 @pytest.fixture

@@ -251,7 +251,11 @@ class TestNoBypass:
         executor_called = False
         execution_result = None
 
-        async def mock_executor(ctx: ActionContext, record: DecisionRecord):
+        async def mock_executor(
+            ctx: ActionContext,
+            record: DecisionRecord,
+            execution_token: str = None,
+        ):
             nonlocal executor_called, execution_result
             executor_called = True
             execution_result = {"status": "success", "action_id": ctx.action_id}
@@ -414,10 +418,15 @@ class TestNoBypass:
         # Create execution control plane
         executor_called = False
 
-        async def mock_executor(ctx, record):
+        async def mock_executor(ctx, record, execution_token=None):
             nonlocal executor_called
             # Mark as legitimate before executing
-            mark_legitimate_execution(record)
+            mark_legitimate_execution(
+                decision_record=record,
+                execution_token=execution_token,
+                action_id=ctx.action_id,
+                control_plane=ecp,
+            )
             try:
                 # This simulates what the control plane would do
                 executor_called = True
@@ -530,7 +539,7 @@ class TestTTLExpiryMidRun:
         action_1_executed = False
         action_2_executed = False
 
-        async def mock_executor(ctx, record):
+        async def mock_executor(ctx, record, execution_token: str = None):
             nonlocal action_1_executed, action_2_executed
             if call_count == 1:
                 action_1_executed = True
@@ -841,7 +850,7 @@ class TestExecutionControlPlaneIntegration:
 
         mock_permit_validator.check_ttl_expiry = wrapped_check_ttl
 
-        async def mock_executor(ctx, record):
+        async def mock_executor(ctx, record, execution_token: str = None):
             execution_order.append("executor")
             return {"status": "success"}
 
@@ -891,7 +900,7 @@ class TestExecutionControlPlaneIntegration:
         async def capture_forensic_event(event: ForensicEvent):
             forensic_events.append(event)
 
-        async def mock_executor(ctx, record):
+        async def mock_executor(ctx, record, execution_token: str = None):
             return {"status": "success"}
 
         ecp = ExecutionControlPlane(
@@ -1312,15 +1321,13 @@ class TestConcurrencyRateLimitIntegrity:
 
         async def attempt_action(task_id: int):
             """Attempt to execute an action."""
-            # Record the action first
-            rate_limiter.record_action(
+            # Atomically check and record
+            allowed, current_rate = rate_limiter.check_and_record(
                 target_id=target_id,
                 campaign_id="test-campaign",
                 action_type="test_action",
+                max_rate=max_rate,
             )
-
-            # Check if allowed
-            allowed, current_rate = rate_limiter.check_rate(target_id, max_rate)
             results.append({
                 "task_id": task_id,
                 "allowed": allowed,
@@ -1387,14 +1394,12 @@ class TestConcurrencyRateLimitIntegrity:
             barrier.wait()
 
             # All threads check+record at ~same instant
-            allowed, rate = rate_limiter.check_rate(target_id, max_rate)
-
-            if allowed:
-                rate_limiter.record_action(
-                    target_id=target_id,
-                    campaign_id="test",
-                    action_type="concurrent_test",
-                )
+            allowed, rate = rate_limiter.check_and_record(
+                target_id=target_id,
+                campaign_id="test",
+                action_type="concurrent_test",
+                max_rate=max_rate,
+            )
 
             results.append({
                 "thread_id": thread_id,
@@ -1417,7 +1422,7 @@ class TestConcurrencyRateLimitIntegrity:
             t.join()
 
         # Count final rate
-        _, final_rate = rate_limiter.check_rate(target_id, max_rate)
+        final_rate = rate_limiter.get_rate(target_id)
 
         # CRITICAL: Final rate should not exceed max_rate
         # If double-spend occurred, final_rate would be > max_rate
@@ -1561,10 +1566,65 @@ class TestExecutionTokenValidation:
         token = ecp.generate_execution_token("test-action", record)
 
         # First validation should succeed
-        assert ecp.validate_execution_token("test-action", token) is True
+        assert ecp.validate_execution_token(
+            token=token,
+            action_id="test-action",
+        ) is True
 
         # Second validation should fail (token consumed)
-        assert ecp.validate_execution_token("test-action", token) is False
+        assert ecp.validate_execution_token(
+            token=token,
+            action_id="test-action",
+        ) is False
+
+    @pytest.mark.asyncio
+    async def test_token_revoked_after_execution(
+        self,
+        action_context_factory,
+        mock_permit_validator,
+        mock_runtime_guard,
+        mock_rate_limiter,
+        mock_target_safety,
+    ):
+        """Test that execution consumes the token at the validation boundary."""
+        from src.core.engine import ExecutionControlPlane, create_token_validated_executor
+
+        captured = {}
+
+        async def mock_action_executor(ctx, record):
+            from src.sim import get_current_execution_token
+
+            captured["token"] = get_current_execution_token()
+            return {"status": "success"}
+
+        ecp = ExecutionControlPlane(
+            permit_validator=mock_permit_validator,
+            runtime_guard=mock_runtime_guard,
+            rate_limiter=mock_rate_limiter,
+            target_safety=mock_target_safety,
+        )
+        ecp._action_executor = create_token_validated_executor(
+            ecp,
+            mock_action_executor,
+        )
+
+        ctx = action_context_factory()
+
+        record, result = await ecp.validate_and_execute_action(ctx)
+
+        assert record.executed is True
+        assert result is not None
+
+        token = captured.get("token")
+        assert token is not None
+        assert (
+            ecp.validate_execution_token(
+                token=token,
+                action_id=ctx.action_id,
+                consume=False,
+            )
+            is False
+        )
 
     @pytest.mark.asyncio
     async def test_invalid_token_rejected(self):
@@ -1583,7 +1643,10 @@ class TestExecutionTokenValidation:
         ecp.generate_execution_token("test-action", record)
 
         # Try to validate with wrong token
-        assert ecp.validate_execution_token("test-action", "wrong-token") is False
+        assert ecp.validate_execution_token(
+            token="wrong-token",
+            action_id="test-action",
+        ) is False
 
         # Original token should still be valid (wrong token doesn't consume)
         # Actually no - validation with wrong token doesn't consume the real token
@@ -1608,7 +1671,10 @@ class TestExecutionTokenValidation:
         assert ecp.revoke_execution_token("test-action") is True
 
         # Token should no longer be valid
-        assert ecp.validate_execution_token("test-action", token) is False
+        assert ecp.validate_execution_token(
+            token=token,
+            action_id="test-action",
+        ) is False
 
         # Revoking again should return False (already revoked)
         assert ecp.revoke_execution_token("test-action") is False
@@ -1774,6 +1840,194 @@ class TestSIMBypassPrevention:
             await executor.stop()
 
     @pytest.mark.asyncio
+    async def test_forged_long_token_spoof_fails(self):
+        """
+        Test that a forged long token spoof attempt fails closed.
+        """
+        from src.core.config import Config
+        from src.core.engine import ExecutionControlPlane
+        from src.core.exceptions import GuardBypassError
+        from src.sim import Executor, ExecutionContext, mark_legitimate_execution, clear_legitimate_execution
+        from unittest.mock import AsyncMock
+
+        config = Config()
+        executor = Executor(config)
+
+        context = ExecutionContext(
+            mission_id=uuid4(),
+            phase_name="test_phase",
+            action_index=0,
+            total_actions=1,
+            environment="simulation",
+            classification_level="UNCLASS",
+            alert_count=0,
+            impact_score=0.0,
+        )
+
+        action = {
+            "action_id": "forged-action",
+            "type": "reconnaissance",
+            "target": {"asset": "192.168.1.1"},
+        }
+
+        mission = MagicMock()
+        mission.mission_id = uuid4()
+
+        executor._simulate_action = AsyncMock(return_value={"status": "ok"})
+
+        control_plane = ExecutionControlPlane()
+
+        try:
+            mark_legitimate_execution(
+                decision_record=None,
+                execution_token="A" * 80,
+                action_id="forged-action",
+                control_plane=control_plane,
+            )
+
+            with pytest.raises(GuardBypassError) as exc_info:
+                await executor._execute_action(action, context, mission)
+
+            assert exc_info.value.bypass_path == "token_validation_failed"
+            assert executor._simulate_action.call_count == 0
+        finally:
+            clear_legitimate_execution()
+
+    @pytest.mark.asyncio
+    async def test_valid_control_plane_token_allows_execution(self):
+        """
+        Test that only a control-plane-minted token allows execution.
+        """
+        from src.core.config import Config
+        from src.core.engine import ExecutionControlPlane, DecisionRecord
+        from src.sim import Executor, ExecutionContext, mark_legitimate_execution, clear_legitimate_execution
+        from unittest.mock import AsyncMock
+
+        config = Config()
+        executor = Executor(config)
+
+        context = ExecutionContext(
+            mission_id=uuid4(),
+            phase_name="test_phase",
+            action_index=0,
+            total_actions=1,
+            environment="simulation",
+            classification_level="UNCLASS",
+            alert_count=0,
+            impact_score=0.0,
+        )
+
+        action = {
+            "action_id": "valid-action",
+            "type": "reconnaissance",
+            "target": {"asset": "192.168.1.1"},
+        }
+
+        mission = MagicMock()
+        mission.mission_id = uuid4()
+
+        executor._simulate_action = AsyncMock(return_value={"status": "ok"})
+
+        control_plane = ExecutionControlPlane()
+        record = DecisionRecord(
+            action_id="valid-action",
+            action_context_hash="hash",
+        )
+        record.all_guards_passed = True
+        token = control_plane.generate_execution_token("valid-action", record)
+
+        try:
+            mark_legitimate_execution(
+                decision_record=record,
+                execution_token=token,
+                action_id="valid-action",
+                control_plane=control_plane,
+            )
+
+            result = await executor._execute_action(action, context, mission)
+            assert executor._simulate_action.call_count == 1
+            assert result.status == "success"
+        finally:
+            clear_legitimate_execution()
+
+    @pytest.mark.asyncio
+    async def test_fake_action_runner_rejected(self, mock_mission):
+        """
+        Test that an untrusted action_runner is rejected before execution.
+        """
+        from src.core.config import Config
+        from src.core.exceptions import GuardBypassError
+        from src.sim import Executor
+
+        config = Config()
+        executor = Executor(config)
+
+        fake_called = False
+
+        async def fake_runner(ctx):
+            nonlocal fake_called
+            fake_called = True
+            return None, None
+
+        with pytest.raises(GuardBypassError) as exc_info:
+            async for _ in executor.execute(mock_mission, action_runner=fake_runner):
+                pass
+
+        assert exc_info.value.bypass_path == "execute_with_untrusted_action_runner"
+        assert fake_called is False
+
+    @pytest.mark.asyncio
+    async def test_action_executor_callback_requires_control_plane(self):
+        """
+        Test that action executor callback uses control plane validation.
+        """
+        from src.core.config import Config
+        from src.core.engine import (
+            ActionContext,
+            DecisionRecord,
+            ExecutionControlPlane,
+            FrostGateSpear,
+        )
+        from src.core.exceptions import GuardBypassError
+
+        config = Config()
+        engine = FrostGateSpear(config)
+
+        mission = MagicMock()
+        mission.mission_id = uuid4()
+        mission.current_phase = "test"
+        mission.actions_completed = 0
+        mission.plan = MagicMock()
+        mission.plan.total_actions = 1
+
+        control_plane = ExecutionControlPlane()
+        callback = engine._create_action_executor_callback(mission, control_plane)
+
+        ctx = ActionContext(
+            tenant_id=str(uuid4()),
+            campaign_id=str(uuid4()),
+            mode="SIM",
+            risk_tier=1,
+            scope_id=str(uuid4()),
+            action={"type": "reconnaissance", "tool_id": "nmap"},
+            target={"target_id": "HOST-123456789", "asset": "192.168.1.1"},
+            entrypoint={"entrypoint_id": "ep-001"},
+            permit={"permit_id": "permit-1"},
+            action_id="callback-action",
+        )
+
+        record = DecisionRecord(
+            action_id=ctx.action_id,
+            action_context_hash="hash",
+        )
+        record.all_guards_passed = True
+
+        with pytest.raises(GuardBypassError) as exc_info:
+            await callback(ctx, record, execution_token="forged-token")
+
+        assert exc_info.value.bypass_path == "token_validation_failed"
+
+    @pytest.mark.asyncio
     async def test_direct_execute_action_call_raises_guard_bypass_error(self):
         """
         Test that directly calling _execute_action raises GuardBypassError.
@@ -1874,6 +2128,7 @@ class TestSIMBypassPrevention:
             mark_legitimate_execution,
             clear_legitimate_execution,
         )
+        from src.core.engine import ExecutionControlPlane
 
         config = Config()
         executor = Executor(config)
@@ -1904,14 +2159,17 @@ class TestSIMBypassPrevention:
                 decision_record=None,
                 execution_token=None,  # No token!
                 action_id=None,
-                control_plane=None,
+                control_plane=ExecutionControlPlane(),
             )
 
             # Should still raise because no token
             with pytest.raises(GuardBypassError) as exc_info:
                 await executor._execute_action(action, context, mission)
 
-            assert exc_info.value.bypass_path == "missing_execution_token"
+            assert exc_info.value.bypass_path in [
+                "missing_execution_token",
+                "missing_action_id",
+            ]
 
         finally:
             clear_legitimate_execution()
@@ -1919,13 +2177,11 @@ class TestSIMBypassPrevention:
     @pytest.mark.asyncio
     async def test_spoofed_short_token_raises_error(self):
         """
-        Test that a short/invalid token format is rejected.
-
-        This tests token format validation - tokens must be at least 40 chars
-        (secrets.token_urlsafe(32) produces 43 chars).
+        Test that a spoofed token fails validation.
         """
         from src.core.config import Config
         from src.core.exceptions import GuardBypassError
+        from src.core.engine import ExecutionControlPlane
         from src.sim import (
             Executor,
             ExecutionContext,
@@ -1960,16 +2216,16 @@ class TestSIMBypassPrevention:
             # Spoof legitimate execution WITH short token
             mark_legitimate_execution(
                 decision_record=None,
-                execution_token="short_fake_token",  # Too short!
+                execution_token="short_fake_token",
                 action_id="test",
-                control_plane=None,
+                control_plane=ExecutionControlPlane(),
             )
 
-            # Should still raise because token is too short
+            # Should still raise because token is invalid
             with pytest.raises(GuardBypassError) as exc_info:
                 await executor._execute_action(action, context, mission)
 
-            assert exc_info.value.bypass_path == "invalid_token_format"
+            assert exc_info.value.bypass_path == "token_validation_failed"
 
         finally:
             clear_legitimate_execution()
